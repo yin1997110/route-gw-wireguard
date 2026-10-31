@@ -1,0 +1,4 @@
+# Ubuntu 26.04+ 的 wg-quick AppArmor 策略默认禁止 PostUp/PostDown 执行任意脚本。
+# 只放行本方案的两个钩子，且让它们以 unconfined 运行（脚本内部要调 ip/iptables/sysctl）。
+/usr/local/bin/wg-route-up.sh rux,
+/usr/local/bin/wg-route-down.sh rux,

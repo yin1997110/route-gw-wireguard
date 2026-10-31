@@ -4,6 +4,7 @@
 > 面板不是独立服务，它读写的是网关本体（`wg0.conf`、策略路由、dnsmasq 配置），
 > 网关没跑起来时面板只会显示"未接入节点"。
 > 形态：单文件 Python 标准库后端 + 预构建 Vue3 静态产物 + systemd 常驻，全部跑在 201 容器内。
+> 从 CT201 整套搬到一台原生 Ubuntu 主机（含面板数据/AppArmor）见 **MIGRATE.md**。
 
 ---
 
@@ -24,7 +25,7 @@
 route-gw-deploy/
 ├── install-web.sh              ← 面板一键安装/升级(幂等，可反复跑)
 └── web/
-    ├── server/gw_server.py     ← 后端全部逻辑(单文件，约 93KB)
+    ├── server/gw_server.py     ← 后端全部逻辑(单文件，约 120KB)
     ├── gw-admin.service        ← systemd 单元
     ├── app/                    ← 前端源码(Vue3 + Vite + Element Plus)
     │   ├── src/{api,store,views,components,constants,assets,utils,router}
@@ -44,7 +45,7 @@ route-gw-deploy/
 └── data/                      ← 面板的全部状态，备份就备这个目录
     ├── credentials.json       账号(salt+PBKDF2-SHA256 12万次迭代，不存明文)
     ├── sessions.json          登录会话(服务重启不掉线)
-    ├── config.json            网关参数(WAN/网段/MSS/节点源/查询日志开关…)
+    ├── config.json            面板参数(MSS/节点源/查询日志开关…；WAN/LAN 地址不落盘，实时探测)
     ├── autoswitch.json        自动切换与自愈策略
     ├── nodes.json             节点池(矩阵页同步结果 + 手动节点 + 排除名单)
     ├── rules.json             分流规则与命中计数
@@ -67,19 +68,20 @@ pct push 201 route-gw-deploy.tar.gz /tmp/route-gw-deploy.tar.gz
 pct exec 201 -- tar --no-same-owner -xzf /tmp/route-gw-deploy.tar.gz -C /opt
 
 # 2) 安装/升级
-pct exec 201 -- bash /opt/route-gw-deploy/install-web.sh
+pct exec 201 -- env GW_GFW_DNS='<隧道内DNS>' bash /opt/route-gw-deploy/install-web.sh
 ```
 
-可选环境变量（两个都只在**容器内**那层 shell 生效才有用）：
+可选环境变量（都只在**容器内**那层 shell 生效才有用）：
 
 ```bash
 # 在 201 容器内直接跑
 ADMIN_PASSWORD='你自己的密码' bash install-web.sh   # 指定管理员密码(首装和重置都用它)
 GW_PANEL_PORT=9000            bash install-web.sh   # 换端口(会自动写 systemd drop-in Environment=GW_PORT=9000)
+GW_GFW_DNS=<DNS>              bash install-web.sh   # 同时写 /etc/default/route-gw，供 cron 的 update-lists 复用
 
 # 从 PVE 宿主机远程跑：env 必须放在 -- 后面，写成 `ADMIN_PASSWORD=x pct exec 201 -- bash …`
 # 只会把变量设到宿主机的 pct 进程上，容器里读不到——这是最容易踩的假成功。
-pct exec 201 -- env ADMIN_PASSWORD='你自己的密码' GW_PANEL_PORT=9000 \
+pct exec 201 -- env ADMIN_PASSWORD='你自己的密码' GW_PANEL_PORT=9000 GW_GFW_DNS='<DNS>' \
     bash /opt/route-gw-deploy/install-web.sh
 ```
 
@@ -105,14 +107,19 @@ systemctl daemon-reload && systemctl restart gw-admin
 systemctl show gw-admin -p Environment    # 确认三条都在
 ```
 
-> 同一份配置里 `/etc/dnsmasq.d/98-custom-domain.conf` 与 `update-lists.sh` 的 `GFW_DNS` 也要换成同一个真实 DNS，
-> 否则面板显示的上游和实际下发的上游会不一致。
+> `install-web.sh` 会把同一个 `GW_GFW_DNS` 写进 `/etc/default/route-gw`，`update-lists.sh` 和
+> `wg-route-up.sh` 都从那里读；cron 不会继承 systemd 的 Environment，所以这一步不能省。
+> 换 DNS 时改 drop-in 后重启面板，并同步改 `/etc/default/route-gw`（或重跑一次 install-web.sh 带环境变量）。
 
 > 自检为什么不用 `/api/system/info`：未登录时它返回的是 **HTTP 200 + code 401**，
 > `curl -f` 不会失败，拿它做健康检查等于什么都没测。
 
-看到 `API OK: 面板已在 :8080 提供接口` 后，浏览器打开 `http://<GW_IP>:8080`，
+看到 `API OK: 面板已在 :8080 提供接口` 后，浏览器打开 `http://<201的LAN地址>:8080`，
 用打印出来的 `admin` / 密码登录。**初始密码只打印这一次**，登录后立刻去「系统设置-账号安全」改。
+
+「系统设置 → 旁路由接入」会实时显示本机 LAN 地址、内网网段、上游网关，并直接给出客户端填法
+（网关和 DNS 都填同一个地址）。这些值来自 `ip route`/`ip addr` 现算，不读 `config.json`；
+换 IP、换网段后刷新页面就跟随，不需要改代码或重启面板。
 
 ## 四、登录、会话与账号安全
 
@@ -232,7 +239,7 @@ bash /opt/route-gw-deploy/tools/peer-check.sh
 
 本容器的 rsyslogd 抢不到由 journald 持有的 `/dev/log`，`/var/log/syslog` 自开机起就没再写入。
 面板的命中统计线程因此跟 `journalctl -u dnsmasq.service -f -o short-iso`，
-从 `query[A] google.com from 192.168.99.10` 这种行里提域名，按规则优先级匹配后写进
+从 `query[A] google.com from 192.168.1.202` 这种行里提域名，按规则优先级匹配后写进
 `HITS`（内存滚动，面板重启不追历史）。另外 `log-queries` 是**启动期**选项：
 开/关它必须 `systemctl restart dnsmasq`（reload 不生效），面板用 `dns_state.json` 记住上次状态，
 只在不一致时才 restart，避免每次存规则都把全网 DNS 抖一下。手工排错同样用
@@ -338,7 +345,7 @@ pct exec 201 -- python3 /opt/gw-admin/gw_server.py --status       # 4) 冒烟：
 
 - 本包不含任何真实私钥或密码（`wg0.conf` 为示例值，密码一律走环境变量传入），可以放心公开。
 - 面板默认监听 `0.0.0.0:8080`，**自用场景请只在受信内网开放**；要暴露到公网请先上 TLS/反代并改强密码，
-  或直接只监听内网地址：drop-in 写 `Environment=GW_BIND=192.168.99.1`。
+  或直接只监听 LAN 地址：drop-in 写 `Environment=GW_BIND=<201的LAN地址>`（换 IP 时要同步改）。
 - 面板以 root 运行且能重启网关，能登进面板≈能控这台机器；账号只给自己，改密后旧会话仍在
   `data/sessions.json` 里，必要时清掉该文件并 `systemctl restart gw-admin`。
 - 备份：`/opt/gw-admin/data` + `/etc/wireguard` + `/etc/dnsmasq.d` + `/usr/local/bin` 四样，

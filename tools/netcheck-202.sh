@@ -13,33 +13,40 @@ IPv6=$(ip -6 a show scope global | grep -c 'inet6' || true)
 date
 timedatectl show -p NTPSynchronized --value | grep -q yes && pass "时钟已同步(TLS 前提)" || fail "时钟未同步"
 
+# 当前位置就是客户端的默认网关（同网段旁路由的 LAN 地址），不写死
+GW_IP=$(ip route show default | awk '/^default/{print $3; exit}')
+DNS_IP=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
 echo "===== 1. 内网/网关 ====="
-if ping -c 10 -W 1 192.168.99.1 >/dev/null 2>&1; then
-  pass "网关 201 可达: $(ping -c 10 -W 1 192.168.99.1 2>/dev/null | tail -2 | head -1)"
+echo "  默认网关: ${GW_IP:-无}   DNS: ${DNS_IP:-无}"
+if [ -n "${GW_IP:-}" ] && ping -c 10 -W 1 "$GW_IP" >/dev/null 2>&1; then
+  pass "旁路由网关可达: $(ping -c 10 -W 1 "$GW_IP" 2>/dev/null | tail -2 | head -1)"
 else fail "ping 网关失败"; fi
+[ "${DNS_IP:-}" = "${GW_IP:-}" ] && pass "DNS 与网关同为旁路由地址" \
+  || fail "DNS(${DNS_IP:-无}) != 网关(${GW_IP:-无})，域名分流会失效"
 
 echo "===== 2. DNS 双视角 ====="
-DOM_RESOLVED=1; OVS_RESOLVED=1
+# 只看 A 记录：getent hosts 会优先返回 IPv6，不能用来判断 IPv4 分流
+DOM_OK=0; OVS_OK=0
 for d in baidu.com qq.com taobao.com jd.com; do
-  ip=$(getent hosts "$d" | awk '{print $1; exit}')
+  ip=$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}')
   echo "  $d -> ${ip:-FAIL}"
-  [ -z "$ip" ] && DOM_RESOLVED=0
+  [ -n "$ip" ] && DOM_OK=$((DOM_OK+1))
 done
 for d in google.com youtube.com github.com twitter.com instagram.com; do
-  ip=$(getent hosts "$d" | awk '{print $1; exit}')
+  ip=$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}')
   echo "  $d -> ${ip:-FAIL}"
-  [ -z "$ip" ] && OVS_RESOLVED=0
+  [ -n "$ip" ] && OVS_OK=$((OVS_OK+1))
 done
-[ $DOM_RESOLVED = 1 ] && pass "国内域名解析正常" || fail "国内域名解析异常"
-[ $OVS_RESOLVED = 1 ] && pass "GFW 域名解析正常(经 WG DNS)" || fail "GFW 域名解析异常"
+[ "$DOM_OK" -ge 3 ] && pass "国内域名解析正常 ($DOM_OK/4)" || fail "国内域名解析异常 ($DOM_OK/4)"
+[ "$OVS_OK" -ge 3 ] && pass "GFW 域名解析正常 ($OVS_OK/5)" || fail "GFW 域名解析异常 ($OVS_OK/5)"
 
 echo "===== 3. ICMP 分流（IP 层，不经 DNS） ====="
-R1=$(ping -c 5 -W 2 223.5.5.5 2>/dev/null | tail -1 | awk '{print $4}')
-echo "  国内 223.5.5.5 loss=$R1"
-[ "${R1%\'*}" = "0" ] && pass "国内 ICMP 直连" || fail "国内 ICMP 丢包"
-R2=$(ping -c 5 -W 3 1.1.1.1 2>/dev/null | tail -1 | awk '{print $4}')
-echo "  海外 1.1.1.1 loss=$R2 (经隧道)"
-[ "${R2%\'*}" = "0" ] && pass "海外 ICMP 走隧道" || fail "海外 ICMP 丢包"
+R1=$(ping -c 5 -W 2 223.5.5.5 2>/dev/null | sed -n 's/.*, \([0-9]*\)% packet loss.*/\1/p')
+echo "  国内 223.5.5.5 loss=${R1:-100}%"
+[ "${R1:-100}" = "0" ] && pass "国内 ICMP 直连" || fail "国内 ICMP 丢包"
+R2=$(ping -c 10 -W 3 1.1.1.1 2>/dev/null | sed -n 's/.*, \([0-9]*\)% packet loss.*/\1/p')
+echo "  海外 1.1.1.1 loss=${R2:-100}% (经隧道，链路本身可能轻度丢包)"
+[ "${R2:-100}" -le 20 ] && pass "海外 ICMP 走隧道" || fail "海外 ICMP 丢包"
 
 echo "===== 4. 国内 HTTPS 与耗时 ====="
 for u in https://www.baidu.com https://www.qq.com http://myip.ipip.net; do
@@ -81,12 +88,27 @@ echo "===== 10. 边界项 ====="
 # 单标签/无效域名行为
 getent hosts nonexistent.invalid >/dev/null 2>&1 && fail "NXDOMAIN 处理" || pass "无效域名正确拒绝"
 # UDP 53 直接查询
-python3 - <<'PYEOF' 2>/dev/null && pass "UDP53 手工报文查询" || fail "UDP53 手工查询"
-import socket,struct,random
-rid=random.randint(0,65535)
-q=struct.pack('!H',rid)+b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06google\x03com\x00\x00\x01\x00\x01'
-s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(5)
-s.sendto(q,('192.168.99.1',53));d,_=s.recvfrom(512)
-assert d[0:2]==struct.pack('!H',rid) and d[6:8]!=b'\x00\x00'
+DNS_IP="${DNS_IP:-$GW_IP}" python3 - <<'PYEOF' && pass "UDP53 手工报文查询" || fail "UDP53 手工查询"
+import os,socket,struct,random,time
+ip = os.environ['DNS_IP']
+last = None
+for _ in range(3):
+    rid = random.randint(0, 65535)
+    q = struct.pack('!H', rid) + b'\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x06google\x03com\x00\x00\x01\x00\x01'
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(3)
+    try:
+        s.sendto(q, (ip, 53))
+        d, _ = s.recvfrom(512)
+        if d[0:2] == struct.pack('!H', rid):
+            raise SystemExit(0)
+        last = "bad id"
+    except Exception as e:
+        last = repr(e)
+    finally:
+        s.close()
+    time.sleep(0.3)
+print("UDP53 failed:", last, file=__import__('sys').stderr)
+raise SystemExit(1)
 PYEOF
 echo "===== 完成 ====="

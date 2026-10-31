@@ -10,7 +10,11 @@ set -u
 
 CHINA_URL="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 GFW_URL="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
-GFW_DNS="198.51.100.53"
+
+# 隧道内 DNS 上游不写死在仓库里：优先取本机覆盖文件/环境变量，
+# 未配置时才落到文档占位值（198.51.100.53 不可用，仅用于自包含演示）。
+[ -r /etc/default/route-gw ] && . /etc/default/route-gw
+GFW_DNS="${GW_GFW_DNS:-198.51.100.53}"
 
 CHINA_LIST="/etc/china_ip_list.txt"
 GFW_CONF="/etc/dnsmasq.d/99-gfw.conf"
@@ -74,9 +78,9 @@ if [ "$OK_DNS" = "1" ] && command -v systemctl >/dev/null && systemctl is-active
     systemctl restart dnsmasq && log "dnsmasq 已重启"
 fi
 
-# ---------- 3. 隧道在跑就立即重新灌入国内直连路由 ----------
-if ip rule show 2>/dev/null | grep -q '32764:' && [ -f "$CHINA_LIST" ]; then
-    /usr/local/bin/wg-route-up.sh >/dev/null 2>&1 && log "国内直连路由已刷新"
+# ---------- 3. 隧道在跑就立即重新灌入国内直连路由（同时校准 LAN 网段/NAT） ----------
+if ip link show wg0 >/dev/null 2>&1 && [ -f "$CHINA_LIST" ]; then
+    /usr/local/bin/wg-route-up.sh >/dev/null 2>&1 && log "国内直连路由与旁路由 NAT 已刷新"
 fi
 
 exit 0

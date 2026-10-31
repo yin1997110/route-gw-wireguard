@@ -1,11 +1,14 @@
-# route-gw — WireGuard 策略路由分流网关 + 管理面板
+# route-gw — 同网段单臂旁路由（WireGuard 策略路由分流）+ 管理面板
 
-单台非特权 LXC 容器搞定分流：国内 IP 段直连、其余走隧道；DNS 按域名分流；主表默认路由全程不动。
+单台非特权 LXC 容器（只有一块 LAN 网卡）搞定分流：国内 IP 段直连、其余走隧道；DNS 按域名分流；
+主表默认路由全程不动。**同网段任意主机只要把「默认网关 + DNS」都指向 201 就自动跟随分流**，
+不需要第二块网卡、不需要改客户端路由表，也没有写死 201 的 IP/网段。
+
 自带零依赖管理面板（单文件 Python 标准库后端 + Vue3 前端），负责节点切换、延迟探测和配置/隧道一致性自愈。
 
-> 环境：PVE 9.1.1（宿主机 `<PVE_HOST>`）· LXC **201 = router**（网关+面板）· LXC **202 = client**（测试节点）
+> 环境：PVE 9.1.1（宿主机 `<PVE_HOST>`）· LXC **201 = router/旁路由**（单网卡 eth0 + 面板）· LXC **202 = client**（同网段测试机）
 > 系统：Ubuntu 24.04 非特权容器 · WireGuard 对端示例段 `203.0.113.0/24`（RFC 5737 文档地址，换成你自己的节点）
-> 本目录是**自包含**的：换一套环境也能照着文档从零重建。两台机器都已实测「重启自恢复」通过。
+> 本目录是**自包含**的：换一套环境也能照着文档从零重建。201/202 均已实测「重启自恢复」「换 IP 后自动跟随」。
 
 ---
 
@@ -15,6 +18,8 @@
 |---|---|
 | 只搭分流网关（网络层） | **DEPLOY.md**（一→五节照跑即可） |
 | 网关之上再装管理面板 | DEPLOY.md 做完 → **WEB-DEPLOY.md** |
+| 把现有 CT201 整套搬到一台原生 Ubuntu 主机 | **MIGRATE.md** |
+| 看迁移后的实测结果/性能/重启恢复 | **TEST-REPORT.md** |
 | 只想快速上手 | 本文下面的「三、快速开始」 |
 | 改前端代码 / 加功能 | **web/app/CONTRACT.md**（开发契约）+ **web/app/ITERATION.md**（怎么迭代） |
 | 排障 | DEPLOY.md 第七节 · WEB-DEPLOY.md 第十节 |
@@ -30,16 +35,20 @@ route-gw-deploy/
 ├── README.md                  ← 本文：总入口
 ├── DEPLOY.md                  ← 网关部署文档（架构原理 + 一步步命令 + 验证标准）
 ├── WEB-DEPLOY.md              ← 面板部署文档（部署/登录/与网关融合点/换节点语义/运维）
+├── MIGRATE.md                 ← 把 CT201 整套搬到一台原生 Ubuntu 主机（含 AppArmor 坑）
+├── TEST-REPORT.md             ← 迁移后的 0.x 客户端 / Docker Registry / 大文件 / 强制重启报告
 ├── install.sh                 ← 在 201 内以 root 执行：一键装网关（8 步，幂等）
 ├── install-web.sh             ← 在 201 内以 root 执行：一键装/升面板（幂等，不覆盖 data/）
 ├── setup-202.sh               ← 在 202 内以 root 执行：客户端 DNS/网关对接（只有两件事）
 ├── files/                     ← 要落到容器里的配置文件原文（ wg0.conf 是示例值，私钥需自填 ）
 │   ├── etc/wireguard/wg0.conf
 │   ├── etc/dnsmasq.conf
+│   ├── etc/dnsmasq.d/00-listen.conf       ← DNS 监听接口（跟随默认路由网卡）
 │   ├── etc/dnsmasq.d/98-custom-domain.conf
 │   ├── etc/cron.d/route-lists
 │   ├── etc/sysctl.d/99-route-gw.conf
 │   ├── etc/systemd/system/dnsmasq.service.d/override.conf
+│   ├── etc/apparmor.d/local/wg-quick      ← Ubuntu 26.04+ 放行 PostUp/PostDown 钩子
 │   └── usr/local/bin/{wg-route-up.sh, wg-route-down.sh, update-lists.sh}
 ├── tools/                     ← 辅助脚本（ssh_run/upload/rexec/portforward 只用 paramiko；两个 .sh 零依赖）
 │   ├── ssh_run.py             paramiko SSH：`host "<cmd>"` / `ct <vmid> "<cmd>"` / `push <vmid|-> <本地> <远端>`
@@ -81,19 +90,24 @@ pct push 201 route-gw-deploy.tar.gz /tmp/route-gw-deploy.tar.gz
 pct exec 201 -- tar --no-same-owner -xzf /tmp/route-gw-deploy.tar.gz -C /opt
 
 # 2) 装网关（会装包、起隧道、灌 ~7400 条国内路由、拉数据源，约 2~4 分钟）
-pct exec 201 -- bash /opt/route-gw-deploy/install.sh
+#    GW_GFW_DNS 是隧道内境外 DNS，写到 /etc/default/route-gw，不落仓库
+pct exec 201 -- env GW_GFW_DNS='<隧道内DNS>' bash /opt/route-gw-deploy/install.sh
 
 # 3) 装管理面板（不给密码就随机生成一个并打印在终端）
 #    注意 ADMIN_PASSWORD 要用 `pct exec … -- env` 传，写在 pct 前面只会设到本机进程上
-pct exec 201 -- env ADMIN_PASSWORD='换成你的密码' bash /opt/route-gw-deploy/install-web.sh
+pct exec 201 -- env ADMIN_PASSWORD='换成你的密码' GW_GFW_DNS='<隧道内DNS>' \
+  bash /opt/route-gw-deploy/install-web.sh
 
-# 4) 客户端 202
+# 4) 客户端 202（网关已在 PVE 侧指向 201；这里只改 DNS + 自检）
 pct push 202 route-gw-deploy/setup-202.sh /opt/setup-202.sh
 pct exec 202 -- bash /opt/setup-202.sh
 ```
 
-装完用 DEPLOY.md 第五节（网关矩阵）和 WEB-DEPLOY.md 第九节（面板 13 项自检）逐条验收。
-浏览器开 `http://<GW_IP>:8080`，用 `admin` + 上面的密码登录。
+装完用 DEPLOY.md 第五节（网关矩阵）和 WEB-DEPLOY.md 第九节（面板自检）逐条验收。
+浏览器开 `http://<201的LAN地址>:8080`，用 `admin` + 上面的密码登录。
+
+**同网段任意主机接入**：在网络设置里把「默认网关」和「DNS」都填成 201 的 LAN 地址
+（面板「系统设置 → 旁路由接入」会直接显示这个地址）。两个都必须指向 201；只改网关会让域名分流失效。
 
 ---
 
@@ -105,6 +119,8 @@ pct exec 202 -- bash /opt/setup-202.sh
 
 1. WG 密钥自己生成：`wg genkey` 出私钥、`wg pubkey` 出公钥；`PublicKey`/`Endpoint` 从你的服务商处拿。
    落到容器里权限 600，且不要把改过的 `wg0.conf` 提交回来。
+   **`install.sh` 升级时不会覆盖已有的 `/etc/wireguard/wg0.conf`**，避免把在用的私钥冲成占位值；
+   确需重置示例配置时才用 `FORCE_WG_CONF=1 bash install.sh`。
 2. PVE / LXC 的 root 密码**不写进本目录**：`tools/ssh_run.py`、`tools/upload.py`、`tools/rexec.py`、
    `tools/portforward.py` 统一从环境变量取，没设就直接报错——
    `export PVE_PW='...'` 之后再调用。（四个工具共用 `ssh_run.py` 里的那一处读取。）
@@ -127,8 +143,9 @@ pct exec 202 -- bash /opt/setup-202.sh
 
 ## 五、这套东西到底是什么
 
-- **分流网关（201）**：三层配合 —— 策略路由规则 + 国内 IP 明细路由（IP 层）+ gfwlist 域名 DNS 劫持（域名层）。
-  国内 IP 走 `eth0` 直连，其余走 `wg0`；202 的网关/DNS 都指向 201，所以 202 自动跟随分流。
+- **分流网关（201，单臂旁路由）**：三层配合 —— 策略路由规则 + 国内 IP 明细路由（IP 层）+ gfwlist 域名 DNS 劫持（域名层）。
+  国内 IP 走 `eth0` 直连，其余走 `wg0`；同网段客户端（202/手机/PC）的网关/DNS 都指向 201，所以自动跟随分流。
+  客户端流量从 eth0 进来、转发后仍从 eth0（直连）或 wg0（隧道）出去，NAT 按运行时算出的 LAN 网段做。
 - **管理面板（也在 201）**：Vue3 前端（预构建静态产物）+ 单文件 Python 标准库后端 + systemd 常驻。
   左侧菜单 11 页：**仪表盘 / 节点管理 / 分流规则 / 自动切换与自愈 / DNS 管理 / 客户端设备 / 切换历史 /
   日志查看 / 数据源 / 系统设置 / 事件日志**。前 6 页是可操作的日常刚需，后 5 页是观测面（只读，

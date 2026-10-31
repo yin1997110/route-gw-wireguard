@@ -12,6 +12,7 @@
 import hashlib
 import hmac
 import http.cookies
+import ipaddress
 import json
 import os
 import re
@@ -188,9 +189,11 @@ class Store:
 
 S = Store(D["DATA"])
 
+# 网络地址一律由 live_config()/Gateway.lan() 现算，这里只放"探测不到时的空值"，
+# 不写死任何 LAN IP/网段（换网络后无需改配置甚至无需重启面板）。
 DEFAULT_CONFIG = {
-    "wanIf": "eth0", "wanGw": "192.168.1.1", "lanCidr": "192.168.99.0/24",
-    "wgLan": "10.14.0.2/16", "mssClamp": True, "listUpdateAt": "04:30",
+    "wanIf": "", "wanGw": "", "lanIf": "", "lanIp": "", "lanPrefix": 0, "lanCidr": "",
+    "dnsAddr": "", "wgLan": "", "mssClamp": True, "listUpdateAt": "04:30",
     "chinaRouteCount": 0, "gfwDomainCount": 0,
     "queryLog": True, "latencyTarget": G["LATENCY_TARGET"], "exitCheckUrl": "https://api.ipify.org",
 }
@@ -288,6 +291,37 @@ class Gateway:
         c = cfg()
         return c["wanGw"], c["wanIf"]
 
+    def lan(self):
+        """同网段单臂旁路由的 LAN 侧信息：LAN 就是默认路由所在网卡。
+
+        返回 {lanIf, lanIp, lanPrefix, lanCidr, wanIf, wanGw, dnsAddr}。
+        全部现取，不依赖 config.json；换 IP/换网段后刷新面板即自动更新。
+        """
+        gw, iface = self.wan()
+        info = {"wanIf": iface, "wanGw": gw, "lanIf": iface, "lanIp": "",
+                "lanPrefix": 0, "lanCidr": "", "dnsAddr": ""}
+        if not iface:
+            return info
+        _, out, _ = sh(["ip", "-4", "-o", "addr", "show", "dev", iface, "scope", "global"])
+        cands = re.findall(r"inet ([\d.]+)/(\d+)", out or "")
+        if not cands:
+            return info
+        # 多地址时优先选"到上游网关的源地址"，它就是客户端该填的那个地址
+        src = ""
+        if gw:
+            _, route, _ = sh(["ip", "-4", "route", "get", gw])
+            m = re.search(r"\bsrc ([\d.]+)", route or "")
+            src = m.group(1) if m else ""
+        ip, prefix = next(((a, p) for a, p in cands if a == src), cands[0])
+        try:
+            prefix = int(prefix)
+            net = ipaddress.ip_network("%s/%d" % (ip, prefix), strict=False)
+        except Exception:  # noqa: BLE001
+            return info
+        info.update({"lanIp": ip, "lanPrefix": prefix,
+                     "lanCidr": str(net), "dnsAddr": ip})
+        return info
+
     def route_count(self):
         _, out, _ = sh(["ip", "-o", "route", "show", "table", "main"])
         return len([l for l in out.splitlines() if l.strip()])
@@ -307,9 +341,13 @@ class Gateway:
         return int((n or "").strip() or 0), int((d or "").strip() or 0)
 
     def has_mss_clamp(self):
-        rc, _, _ = sh(["iptables", "-t", "mangle", "-C", "FORWARD", "-p", "tcp",
-                       "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
-        return rc == 0
+        # 新方案把钳制放在 ROUTE_GW_MSS 链里，兼容旧版的 FORWARD 直挂规则
+        for target in ("ROUTE_GW_MSS", "FORWARD"):
+            rc, _, _ = sh(["iptables", "-t", "mangle", "-C", target, "-p", "tcp",
+                           "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
+            if rc == 0:
+                return True
+        return False
 
     # ---- 写入 ----
     def write_wg_conf(self, pubkey, endpoint):
@@ -419,6 +457,11 @@ class Gateway:
         self.measured_at = time.time()
 
     def check_exit_ip(self, url):
+        # 隧道只承载 IPv4；宿主有 IPv6 时 urllib 可能优先走 IPv6 直连，
+        # 拿到的是家里出口而不是隧道出口。优先用 curl -4 强制 IPv4。
+        rc, out, _ = sh(["curl", "-4", "-fsS", "--max-time", "6", url], timeout=10)
+        if rc == 0 and (out or "").strip():
+            return out.strip()[:64]
         try:
             with urllib.request.urlopen(url, timeout=6) as r:
                 return r.read().decode(errors="replace").strip()[:64]
@@ -1024,7 +1067,8 @@ def unit_state(unit):
 
 
 def lan_neighbors():
-    """邻居表里的下挂设备：排除隧道接口，只保留有链路层地址的条目。"""
+    """LAN 邻居表里的下挂设备：只保留默认路由网卡（单臂旁路由的唯一 LAN 口）。"""
+    lan_if = GW.lan().get("lanIf") or ""
     _, out, _ = sh(["ip", "-4", "neigh", "show"])
     rows = {}
     for ln in (out or "").splitlines():
@@ -1032,7 +1076,7 @@ def lan_neighbors():
         if not p or "dev" not in p or p[0].count(".") != 3:
             continue
         dev = p[p.index("dev") + 1] if len(p) > p.index("dev") + 1 else ""
-        if dev == P["WG_IF"]:
+        if dev == P["WG_IF"] or (lan_if and dev != lan_if):
             continue
         rows[p[0]] = {"ip": p[0], "dev": dev,
                       "mac": p[p.index("lladdr") + 1] if "lladdr" in p else None,
@@ -1398,12 +1442,13 @@ def live_config():
     c = dict(cfg())
     china, gfw = GW.list_counts()
     c["chinaRouteCount"], c["gfwDomainCount"] = china, gfw
-    c["wanGw"], c["wanIf"] = GW.wan()
-    for key, dev in (("lanCidr", "eth1"), ("wgLan", P["WG_IF"])):
-        _, out, _ = sh(["ip", "-o", "-4", "addr", "show", "dev", dev])
-        m = re.search(r"inet ([\d./]+)", out or "")
-        if m:
-            c[key] = m.group(1)
+    # LAN 与 WAN 是同一块网卡（单臂旁路由），地址/网段全部现算，不读配置文件
+    info = GW.lan()
+    c.update(info)
+    _, out, _ = sh(["ip", "-o", "-4", "addr", "show", "dev", P["WG_IF"]])
+    m = re.search(r"inet ([\d./]+)", out or "")
+    if m:
+        c["wgLan"] = m.group(1)
     c["mssClamp"] = GW.has_mss_clamp()
     c["listUpdateAt"] = cron_time()
     c.setdefault("nodeSource", D["MATRIX"])
@@ -1774,7 +1819,12 @@ def routes_table():
         addrs = [(addr, dev) for dev, addr in
                  re.findall(r"^\s*\d+:\s+(\S+)\s+inet\s+([\d./]+)", out or "", re.M)
                  if dev != P["WG_IF"]]
-        return ok({"hostname": "%s (LXC 201)" % host.strip(),
+        lan = GW.lan()
+        return ok({"hostname": "%s (旁路由)" % host.strip(),
+                   "mode": "same-subnet-bypass",
+                   "lanIf": lan["lanIf"], "lanIp": lan["lanIp"],
+                   "lanPrefix": lan["lanPrefix"], "lanCidr": lan["lanCidr"],
+                   "dnsAddr": lan["dnsAddr"],
                    "os": pretty.group(1) if pretty else "Linux",
                    "kernel": "%s %s" % (os.uname().sysname, os.uname().release),
                    "cpu": "%d vCore / 负载 %s" % (os.cpu_count() or 1, load[0] if load else "0"),
@@ -1872,15 +1922,24 @@ def routes_table():
 
     def r_cfg_put(q, body, m):
         c = cfg()
+        # 网络地址是现算的，不落 config.json（避免换网络后备份里带出旧地址误导）
+        for k in ("wanIf", "wanGw", "lanIf", "lanIp", "lanPrefix", "lanCidr", "dnsAddr", "wgLan"):
+            c.pop(k, None)
         changed = {k: body[k] for k in ("queryLog", "latencyTarget", "exitCheckUrl", "nodeSource",
                                         "mssClamp", "listUpdateAt") if k in body and body[k] != c.get(k)}
         c.update(changed)
         S.save("config.json", c)
         notes = []
         if "mssClamp" in changed:
-            verb = "-A" if changed["mssClamp"] else "-D"
-            rc, _, e = sh(["iptables", "-t", "mangle", verb, "FORWARD", "-p", "tcp",
-                           "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
+            spec = ["iptables", "-t", "mangle", "-C", "ROUTE_GW_MSS", "-p", "tcp",
+                    "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"]
+            if changed["mssClamp"]:
+                rc, _, e = sh(spec)
+                if rc != 0:
+                    rc, _, e = sh(["iptables", "-t", "mangle", "-A", "ROUTE_GW_MSS", "-p", "tcp",
+                                   "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"])
+            else:
+                rc, _, e = sh(["iptables", "-t", "mangle", "-F", "ROUTE_GW_MSS"])
             notes.append("MSS 钳制%s" % ("已开启" if changed["mssClamp"] else "已关闭")
                          if rc == 0 else "MSS 规则失败: " + e.strip()[:120])
         if "listUpdateAt" in changed:

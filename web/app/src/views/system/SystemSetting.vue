@@ -1,6 +1,6 @@
 <!-- 职责: 系统设置页。网关操作(重载/重启/备份/恢复)、网关基础配置、账号安全、运行环境与隧道自检。 -->
 <script setup>
-import { ref, reactive, onActivated } from 'vue'
+import { ref, reactive, computed, onActivated } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useSystemStore } from '@/store/system'
 import { useAuthStore } from '@/store/auth'
@@ -56,6 +56,10 @@ async function doRestore() {
 
 // ---- 网关配置 ----
 const cfgForm = ref({})
+// 单臂旁路由：网关地址与 DNS 地址是同一个（默认路由网卡上的本机地址）
+const lanAddr = computed(() =>
+  cfgForm.value.lanIp ? `${cfgForm.value.lanIp}/${cfgForm.value.lanPrefix || ''}` : '—'
+)
 async function loadConfig() {
   await sys.fetchConfig()
   cfgForm.value = { ...sys.config }
@@ -132,26 +136,41 @@ onActivated(() => { loadConfig(); sys.fetchSysInfo(); sys.fetchTunnel() })
       </div>
 
       <div class="gw-card st__cfg">
-        <div class="gw-card__title">分流参数</div>
-        <el-form v-if="sys.config" :model="cfgForm" label-width="110px" label-position="left">
-          <el-form-item label="WAN 接口"><el-input v-model="cfgForm.wanIf" /></el-form-item>
-          <el-form-item label="WAN 网关"><el-input v-model="cfgForm.wanGw" /></el-form-item>
-          <el-form-item label="内网网段"><el-input v-model="cfgForm.lanCidr" /></el-form-item>
-          <el-form-item label="WG 隧道网段"><el-input v-model="cfgForm.wgLan" /></el-form-item>
-          <el-form-item label="MSS 钳制"><el-switch v-model="cfgForm.mssClamp" /></el-form-item>
-          <el-form-item label="国内路由数">
-            <span class="gw-num">{{ cfgForm.chinaRouteCount }}</span>
-            <span class="gw-muted st__opdesc">条 · 数据源每日 {{ cfgForm.listUpdateAt }} 自动更新</span>
-          </el-form-item>
-          <el-form-item label="分流域名数">
-            <span class="gw-num">{{ cfgForm.gfwDomainCount }}</span>
-            <span class="gw-muted st__opdesc">条 · 由 gfwlist 同步</span>
-          </el-form-item>
-          <div class="gw-flex st__cfg-actions">
-            <el-button type="primary" @click="saveConfig">保存</el-button>
-            <el-button link @click="loadConfig">放弃修改</el-button>
+        <div class="gw-card__title">旁路由接入</div>
+        <template v-if="sys.config">
+          <el-descriptions :column="1" border size="small">
+            <el-descriptions-item label="接入模式">同网段旁路由（单网卡 · 网关与 DNS 同地址）</el-descriptions-item>
+            <el-descriptions-item label="本机地址">{{ lanAddr }}</el-descriptions-item>
+            <el-descriptions-item label="内网网段">{{ cfgForm.lanCidr || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="上游网关">{{ cfgForm.wanGw || '—' }}（{{ cfgForm.wanIf || '—' }}）</el-descriptions-item>
+            <el-descriptions-item label="客户端填法">
+              网关 = <b class="gw-num">{{ cfgForm.lanIp || '—' }}</b>，DNS = <b class="gw-num">{{ cfgForm.lanIp || '—' }}</b>
+            </el-descriptions-item>
+          </el-descriptions>
+          <div class="st__bypass-tip">
+            同网段任意主机把「默认网关」和「DNS」都指向本机即可分流：国内直连、其余走隧道。
+            地址或网络变化后本页自动跟随，不用改代码或配置。
           </div>
-        </el-form>
+          <el-form :model="cfgForm" label-width="110px" label-position="left">
+            <el-form-item label="WG 隧道地址">
+              <span class="gw-num">{{ cfgForm.wgLan || '—' }}</span>
+              <span class="gw-muted st__opdesc">（wg0，自动读取）</span>
+            </el-form-item>
+            <el-form-item label="MSS 钳制"><el-switch v-model="cfgForm.mssClamp" /></el-form-item>
+            <el-form-item label="国内路由数">
+              <span class="gw-num">{{ cfgForm.chinaRouteCount }}</span>
+              <span class="gw-muted st__opdesc">条 · 数据源每日 {{ cfgForm.listUpdateAt }} 自动更新</span>
+            </el-form-item>
+            <el-form-item label="分流域名数">
+              <span class="gw-num">{{ cfgForm.gfwDomainCount }}</span>
+              <span class="gw-muted st__opdesc">条 · 由 gfwlist 同步</span>
+            </el-form-item>
+            <div class="gw-flex st__cfg-actions">
+              <el-button type="primary" @click="saveConfig">保存</el-button>
+              <el-button link @click="loadConfig">放弃修改</el-button>
+            </div>
+          </el-form>
+        </template>
         <el-skeleton v-else :rows="5" animated />
       </div>
 
@@ -241,6 +260,11 @@ onActivated(() => { loadConfig(); sys.fetchSysInfo(); sys.fetchTunnel() })
 .st__opname { font-size: 14px; font-weight: 600; }
 .st__opdesc { font-size: 12px; margin-top: 2px; }
 .st__cfg-actions { margin-top: 8px; }
+.st__bypass-tip {
+  margin: 10px 0 4px; padding: 8px 10px; font-size: 12px; line-height: 1.7;
+  color: var(--gw-text-2); background: var(--gw-card-hover);
+  border-left: 3px solid var(--gw-accent); border-radius: var(--gw-radius-sm);
+}
 .st__info { margin-top: 12px; padding: 14px 16px; }
 .st__info > .gw-card__title, .st__head { margin-bottom: 10px; }
 .st__pwd-tip { display: block; margin-bottom: 10px; }

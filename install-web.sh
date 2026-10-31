@@ -66,7 +66,22 @@ if [ -n "${GW_PANEL_PORT:-}" ] && [ "$GW_PANEL_PORT" != "8080" ]; then
         > /etc/systemd/system/gw-admin.service.d/port.conf
     echo "  监听端口改为 $GW_PANEL_PORT(drop-in: gw-admin.service.d/port.conf)"
 else
-    rm -rf /etc/systemd/system/gw-admin.service.d
+    # 只删本脚本自己的 port.conf，保留 site.conf 等接入信息 drop-in
+    rm -f /etc/systemd/system/gw-admin.service.d/port.conf
+fi
+
+# 隧道内 DNS 上游写进 /etc/default/route-gw，供 update-lists.sh / wg-route-up.sh 复用
+# （不写进仓库；cron 不继承 systemd 的 Environment，所以必须落文件）
+if [ -n "${GW_GFW_DNS:-}" ]; then
+    install -d /etc/default
+    touch /etc/default/route-gw
+    if grep -q '^GW_GFW_DNS=' /etc/default/route-gw; then
+        sed -i "s|^GW_GFW_DNS=.*|GW_GFW_DNS=$GW_GFW_DNS|" /etc/default/route-gw
+    else
+        printf 'GW_GFW_DNS=%s\n' "$GW_GFW_DNS" >> /etc/default/route-gw
+    fi
+    chmod 644 /etc/default/route-gw
+    echo "  GFW DNS 上游已写入 /etc/default/route-gw"
 fi
 systemctl daemon-reload
 

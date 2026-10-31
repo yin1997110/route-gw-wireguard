@@ -74,7 +74,8 @@ const db = {
   ],
   events: [],
   config: {
-    wanIf: 'eth0', wanGw: '192.168.1.1', lanCidr: '192.168.99.0/24', wgLan: '10.14.0.2/16',
+    wanIf: 'eth0', wanGw: '192.168.1.1', lanIf: 'eth0', lanIp: '192.168.1.212',
+    lanPrefix: 24, lanCidr: '192.168.1.0/24', dnsAddr: '192.168.1.212', wgLan: '10.14.0.2/16',
     mssClamp: true, listUpdateAt: '04:30', chinaRouteCount: 7461, gfwDomainCount: 4372
   },
   autoSwitch: {
@@ -485,10 +486,12 @@ const routes = [
 
   // 系统
   ['GET', /^\/system\/info$/, () => WRAP({
-    hostname: 'route-gw (LXC 201)', os: 'Ubuntu 24.04.1 LTS', kernel: '6.8.0-41-generic',
+    hostname: 'route-gw (旁路由)', mode: 'same-subnet-bypass',
+    lanIf: 'eth0', lanIp: '192.168.1.212', lanPrefix: 24, lanCidr: '192.168.1.0/24', dnsAddr: '192.168.1.212',
+    os: 'Ubuntu 24.04.1 LTS', kernel: '6.8.0-41-generic',
     cpu: '1 vCore / 负载 0.12', memUsed: '212 MB', memTotal: '512 MB',
     uptime: `${Math.floor((now() - (bootAt * 1000)) / 3600_000)} 小时`, loadAvg: '0.12 0.09 0.06',
-    gatewayIp: '192.168.99.1 (eth1) / <GW_IP> (eth0)', dnsMode: 'dnsmasq 分流 (53)',
+    gatewayIp: '192.168.1.212 (eth0)', dnsMode: 'dnsmasq 分流 (53)',
     listUpdatedAt: now() - 3600_000 * 7, bootAt: bootAt * 1000, bootAtText: new Date(bootAt * 1000).toISOString()
   })],
   ['GET', /^\/system\/tunnel$/, () => {
