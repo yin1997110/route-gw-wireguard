@@ -24,15 +24,15 @@
 route-gw-deploy/
 ├── install-web.sh              ← 面板一键安装/升级(幂等，可反复跑)
 └── web/
-    ├── server/gw_server.py     ← 后端全部逻辑(单文件，约 89KB)
-    ├── dist/                   ← 前端构建产物(无需 Node 即可部署)
+    ├── server/gw_server.py     ← 后端全部逻辑(单文件，约 93KB)
     ├── gw-admin.service        ← systemd 单元
     ├── app/                    ← 前端源码(Vue3 + Vite + Element Plus)
     │   ├── src/{api,store,views,components,constants,assets,utils,router}
+    │   ├── dist/               ← 前端构建产物(随包分发，201 无需 Node)
+    │   ├── server/mock-server.js ← 离线演示用假后端，只在开发机用
     │   ├── CONTRACT.md         ← 开发契约(目录/常量/组件/样式/扩展点，改动前必读)
     │   ├── ITERATION.md        ← 迭代手册(加一个页面/接口/常量的标准步骤)
     │   └── package.json / vite.config.js / .env
-    └── (mock) app/server/mock-server.js ← 离线演示用假后端，只在开发机用
 ```
 
 装到 201 后的落点：
@@ -88,6 +88,26 @@ pct exec 201 -- env ADMIN_PASSWORD='你自己的密码' GW_PANEL_PORT=9000 \
 没有账号文件时创建 `admin` 并**随机生成密码打印一次**（`ADMIN_PASSWORD` 给了就用你的）→
 `restart` 服务 → 用"首页 + `/api/user/info`"两个免登录探针自检。
 
+### 接入信息走 drop-in，不写进代码
+
+仓库里的矩阵地址与境外 DNS 都是 RFC 5737 占位值（`matrix.example.com` / `198.51.100.53`）。
+现网用真实值时不要改 `gw_server.py`，给 systemd 写 drop-in，升级面板就不会被覆盖回去：
+
+```bash
+mkdir -p /etc/systemd/system/gw-admin.service.d
+cat > /etc/systemd/system/gw-admin.service.d/site.conf <<'EOF'
+[Service]
+Environment=GW_MATRIX_URL=https://<你的矩阵域名>/data.js
+Environment=GW_GFW_DNS=<WG 出口视角的 DNS>
+Environment=GW_WG_SRC=<订阅分配的隧道地址>
+EOF
+systemctl daemon-reload && systemctl restart gw-admin
+systemctl show gw-admin -p Environment    # 确认三条都在
+```
+
+> 同一份配置里 `/etc/dnsmasq.d/98-custom-domain.conf` 与 `update-lists.sh` 的 `GFW_DNS` 也要换成同一个真实 DNS，
+> 否则面板显示的上游和实际下发的上游会不一致。
+
 > 自检为什么不用 `/api/system/info`：未登录时它返回的是 **HTTP 200 + code 401**，
 > `curl -f` 不会失败，拿它做健康检查等于什么都没测。
 
@@ -120,7 +140,7 @@ pct exec 201 -- env ADMIN_PASSWORD='你自己的密码' GW_PANEL_PORT=9000 \
 | 读 | `iptables -t nat/mangle -S` | NAT/FORWARD/MSS 钳制是否在位 |
 | 读 | `dnsmasq --test` + `/etc/dnsmasq.d/*` 行数 | 分流域名数、配置语法 |
 | 读 | `journalctl -u dnsmasq.service -f` | 域名规则命中日志（见第八节，本容器 rsyslog 是坏的） |
-| 读 | `https://nodes.tbw6.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「立即探测」或 `--sync`） |
+| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「立即探测」或 `--sync`）。仓库里是占位地址，真实地址由 systemd drop-in 的 `GW_MATRIX_URL` 提供，见第三节 |
 | 写 | `/etc/wireguard/wg0.conf` 的 `[Peer]` | 切换节点＝改写公钥+入口，AllowedIPs **恒为** `0.0.0.0/1, 128.0.0.0/1`，绝不跟随节点给的 `0.0.0.0/0` |
 | 写 | `wg syncconf` | 平滑换对端：不重建接口、不动策略路由、下挂设备不断网 |
 | 写 | `/etc/dnsmasq.d/97-panel.conf` | 「分流规则」里的域名规则编译成 `server=/域名/上游` 或 `address=/域名/` |
@@ -130,6 +150,27 @@ pct exec 201 -- env ADMIN_PASSWORD='你自己的密码' GW_PANEL_PORT=9000 \
 
 面板**只碰 `[Peer]` 这一节**，`[Interface]` 的私钥永不进任何接口响应
 （`wg show wg0 dump` 的第 0 行第 0 列就是本机私钥，代码里明确丢弃）。
+
+### 接口清单（46 条，`routes_table()` 里注册）
+
+| 页面 | 端点 | 读写 |
+|---|---|---|
+| 登录 | `POST /api/login` `/api/logout` · `GET /api/user/info` · `POST /api/system/password` | 写(会话/哈希) |
+| 仪表盘 | `/api/dashboard/overview` `/realtime` `/latency` | 读 |
+| 节点管理 | `/api/node/list`（含 `groups` 全量分组、`nodeSource` 真实矩阵地址）`/export` · `POST/PUT/DELETE /api/node` · `POST /api/node/switch/{id}` · `POST /api/node/import` | 读+切换 |
+| 分流规则 | `/api/rule/group*` `/api/rule*` `/api/rule/reorder` `/api/rule/hits` | 读+写 `97-panel.conf`/`ip route` |
+| 自动切换 | `/api/system/config` `/api/system/autoswitch` `/api/system/probe-now` | 读+写策略 |
+| **DNS 管理** | `/api/dns/overview`（dnsmasq 配置/上游/分流域名计数）`/api/dns/query`（指定域名在三上游的解析对比）`/api/dns/hits`（命中流水） | 只读 |
+| **终端设备** | `/api/client/list`（邻居表 + 按 DNS 查询活跃度聚合，`lanTotal`/`onlineTotal`） | 只读 |
+| **切换历史** | `/api/switch/history`（发起事件与结果事件按 `to` 配对，含 `cost` 秒/`result`/`summary`） | 只读 |
+| **日志查看** | `/api/system/log-units`（后端白名单）`/api/system/logs`（journal 单元走 `journalctl -n`，文件单元读尾部） | 只读 |
+| **数据源** | `/api/list/status`（国内 IP 明细/gfwlist 的文件大小、条数、更新时间、日志尾部）`POST /api/list/update`（调既有 `update-lists.sh`） | 读 + 复用已验证脚本 |
+| 事件日志 | `/api/event/list` `/api/event/clear` | 读 |
+| 系统设置 | `/api/system/info` `/api/system/tunnel` `/api/system/backup` `/api/system/restore` `/api/system/reload` `/api/system/restart` | 读+运维动作 |
+
+新增观测页的共同约束：**不新造任何下发路径**。要改配置就复用原来那条已经跑通的路
+（`update-lists.sh`、`97-panel.conf` 编译、`do_switch` 七步），只读页则一律走白名单/参数校验，
+命令一律 `sh([...], shell=False)`，避免把用户输入拼进 shell。
 
 ## 六、切换与自愈的真实语义（这一节是踩坑踩出来的，改代码前务必读）
 
@@ -213,7 +254,7 @@ curl -s -b $CK $A/system/tunnel | python3 -m json.tool | head # 4. wgUp=true、e
 
 | # | 项目 | 期望 |
 |---|---|---|
-| 1 | 六模块页面 | 仪表盘/节点管理/分流规则/自动切换/系统设置/事件日志都出真实数据，节点表 ~697 行 |
+| 1 | 菜单 11 页 | 仪表盘/节点管理/分流规则/自动切换/DNS 管理/客户端设备/切换历史/日志查看/数据源/事件日志/系统设置都出真实数据，节点表 ~697 行 |
 | 2 | 错误密码 | 红条"账号或密码不正确"，不进主界面 |
 | 3 | 登出/重登 | 登出有确认；重启 `gw-admin` 后浏览器**仍是登录态**（sessions.json 持久化） |
 | 4 | 切换（可达节点） | 1 秒内成功，`wg0.conf` 与隧道同步，出口 IP 跟随新节点，CT202 不断网 |

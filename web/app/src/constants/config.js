@@ -5,7 +5,7 @@
 export const APP = {
   NAME: '分流网关',
   VERSION: '1.0.0',
-  NODE_SOURCE_HOME: 'https://nodes.tbw6.com:3333' // 矩阵主数据页(仅"来源说明"展示与打开)
+  NODE_SOURCE_HOME: 'https://matrix.example.com:3333' // 矩阵主数据页(仅"来源说明"展示与打开)
 }
 
 // ---- 布局 ----
@@ -44,6 +44,37 @@ export const REFRESH = {
 
 // ---- 订阅 ----
 export const SUBSCRIPTION = { AUTO_FETCH: true, FETCH_INTERVAL_HOURS: 24 }
+
+// ---- DNS 管理(观测) ----
+export const DNS = {
+  TYPES: [{ value: 'A', label: 'A (IPv4)' }, { value: 'AAAA', label: 'AAAA (IPv6)' }],
+  VIEWS: [
+    { value: 'all', label: '三上游对比' },
+    { value: 'local', label: '本机分流结果' },
+    { value: 'proxy', label: '隧道上游' },
+    { value: 'direct', label: '直连上游' }
+  ],
+  HIT_LIMIT: 40,        // 命中流水一次取多少条
+  HIT_POLL: 5           // 命中流水轮询(秒)
+}
+
+// ---- 客户端设备(观测) ----
+export const CLIENT_VIEW = { POLL: 10, RECENT: 4 } // 活跃轮询(秒) / 表格展开的最近查询数
+
+// ---- 切换历史(观测) ----
+// value 与 gw_server 的 switch_result() 输出一一对应，改一边就要改另一边
+export const SWITCH_RESULT = [
+  { value: 'success', label: '成功', tag: 'success' },
+  { value: 'fail', label: '失败', tag: 'danger' },
+  { value: 'rollback', label: '已回滚', tag: 'warning' },
+  { value: 'pending', label: '无结果', tag: 'info' }
+]
+
+// ---- 日志查看器(观测) ----
+export const LOGS = { LINES: [100, 200, 400], DEFAULT_LINES: 200, POLL: 15 }
+
+// ---- 分流数据源(观测) ----
+export const LIST_VIEW = { POLL: 60 } // 状态轮询(秒)：更新脚本本身由 cron 跑，面板只看结果
 
 // ---- 延迟分级(DelayBadge 用)。loss 为 0~1 小数 ----
 export const DELAY = { GOOD: 150, BAD: 400, LOSS_MILD: 0.01, LOSS_BAD: 0.1 }

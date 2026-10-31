@@ -7,6 +7,23 @@
 > ⚠️ 本包内的 `wg0.conf` 是**示例值**（私钥留空、对端用占位符）。真实私钥只存在于你自己那台机器上，
 > 永远不要写回本仓库、不要提交、不要贴进聊天工具。
 
+### 部署前必须替换的占位符
+
+公开仓库里不保留任何可直接使用的接入信息，落地前先换成你自己的值：
+
+| 位置 | 当前占位值 | 换成 |
+|------|-----------|------|
+| `files/etc/wireguard/wg0.conf` `PrivateKey` / `PublicKey` / `Endpoint` | `<wg genkey 生成…>` / `203.0.113.9:51820` | 订阅给你的私钥、对端公钥与入口地址 |
+| `files/etc/wireguard/wg0.conf` `Address` | `10.14.0.2/16` | 订阅分配给你的隧道地址 |
+| `files/usr/local/bin/update-lists.sh` `GFW_DNS` | `198.51.100.53` | WG 出口视角的境外 DNS |
+| `files/etc/dnsmasq.d/98-custom-domain.conf` 每行末尾 | `198.51.100.53` | 同上（与 `GFW_DNS` 保持一致） |
+| `web/server/gw_server.py` `G["GFW_DNS"]` / `D["MATRIX"]` | `198.51.100.53` / `https://matrix.example.com:3333/data.js` | 见 WEB-DEPLOY.md：推荐用 systemd drop-in `GW_GFW_DNS` / `GW_MATRIX_URL` 覆盖，不改代码 |
+| PVE / LXC 地址、root 密码 | `<PVE_HOST>` 等 | 只写进你自己的密码管理器，别提交 |
+| 面板管理员密码 | 首次登录时设置 | 见 WEB-DEPLOY.md 的初始化步骤 |
+
+`198.51.100.0/24`、`203.0.113.0/24` 是 RFC 5737 文档保留段，故意用作占位：它们不会真的解析出结果，
+照抄部署会得到"域名解析能通但都落在占位上游"的现象，所以务必先替换。
+
 ---
 
 ## 一、架构概览
@@ -176,7 +193,7 @@ PersistentKeepalive = 25
 |--------|-----|
 | 监听 | lo / eth0 / eth1（`bind-interfaces`，需已停 systemd-resolved） |
 | 国内上游 | 223.5.5.5、114.114.114.114 |
-| GFW 域名上游 | 162.252.172.57（无标记流量 → 表51820 → 走 wg0 出） |
+| GFW 域名上游 | 198.51.100.53（无标记流量 → 表51820 → 走 wg0 出） |
 | gfwlist 生成规则 | `/etc/dnsmasq.d/99-gfw.conf`（cron 每日覆盖重写） |
 | 手工补充域名 | `/etc/dnsmasq.d/98-custom-domain.conf`（cron 不动它） |
 | 面板下发域名 | `/etc/dnsmasq.d/97-panel.conf`（管理面板「分流规则」生成，勿手改，见 WEB-DEPLOY.md） |
@@ -315,7 +332,7 @@ iptables -t nat -S POSTROUTING; sysctl net.ipv4.ip_forward
 - **仅 IPv4**：策略路由/明细路由都只覆盖 IPv4；若上游给了 IPv6，海外站点 AAAA 会原生直连出泄漏（本环境容器无 IPv6 地址，暂无影响）。
 - **gfwlist 只管域名**：直接用 IP 访问、或客户端自带 DoH/硬编码 DNS 的应用不受 DNS 层管辖（仍受 IP 层国内列表约束）。
 - **`@@` 例外规则跳过**：gfwlist 里标记直连的域名仍走 WG DNS 解析，但解析出的若为国内 IP 会被 IP 层拉回直连，实际影响小。
-- 162.252.172.57 / 149.154.159.92 是 WG 服务方提供的境外 DNS，失效需换；149.154.159.92 当前仅作备胎未实际使用（dnsmasq 只用 162.252.172.57）。
+- `198.51.100.53 / 198.51.100.54` 是占位用的境外 DNS（见开头"部署前必须替换的占位符"），部署时换成 WG 服务方给的真实地址；备胎那个当前仅作记录，dnsmasq 只用主 DNS。
 - `/var/log/update-lists.log` 未配 logrotate，长期跑注意（可加 `/etc/logrotate.d/route-lists`）。
 
 ## 九、目录清单

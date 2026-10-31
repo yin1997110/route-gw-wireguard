@@ -19,6 +19,7 @@ import secrets
 import shlex
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -37,9 +38,13 @@ P = {
     "WG_IF": os.environ.get("GW_WG_IF", "wg0"),
     "CHINA_LIST": "/etc/china_ip_list.txt",
     "GFW_CONF": "/etc/dnsmasq.d/99-gfw.conf",
+    "DNS_MAIN": os.environ.get("GW_DNS_MAIN_CONF", "/etc/dnsmasq.conf"),
     "CUSTOM_CONF": "/etc/dnsmasq.d/98-custom-domain.conf",
     "PANEL_CONF": "/etc/dnsmasq.d/97-panel.conf",     # 面板接管的下发文件，cron 不覆盖
     "CRON_LISTS": "/etc/cron.d/route-lists",
+    "LIST_LOG": "/var/log/update-lists.log",          # cron 更新数据源的落地日志(只读展示)
+    "DNS_LEASES": "/var/lib/misc/dnsmasq.leases",     # 有 DHCP 时才有内容，没有就空
+    "LOCAL_DNS": "127.0.0.1",                         # 面板测解析时问的"本机分流视图"
     # 查询日志只认 journald：本容器 rsyslog 抢不到 /dev/log，/var/log/syslog 开机即停更
     "DNS_UNIT": os.environ.get("GW_DNS_UNIT", "dnsmasq.service"),
     "UPDATE_LISTS": "/usr/local/bin/update-lists.sh",
@@ -50,9 +55,11 @@ G = {
     "WG_TABLE": "51820",
     "SPLIT_ALLOWED": "0.0.0.0/1, 128.0.0.0/1",   # 分流固定 AllowedIPs，切换节点时不跟随节点值
     "KEEPALIVE": "25",
-    "GFW_DNS": "162.252.172.57",                 # 走隧道的上游(与 98-custom-domain.conf 一致)
+    # 下面两个上游/隧道地址是文档占位值：现网用订阅给的真实值，通过 systemd drop-in
+    # (GW_GFW_DNS / GW_WG_SRC / GW_MATRIX_URL)覆盖，仓库里不保留可用凭据。
+    "GFW_DNS": os.environ.get("GW_GFW_DNS", "198.51.100.53"),   # 走隧道的上游(与 98-custom-domain.conf 一致)
     "DIRECT_DNS": "223.5.5.5",                   # 直连上游(与 dnsmasq.conf server= 一致)
-    "WG_SRC": "10.14.0.2",
+    "WG_SRC": os.environ.get("GW_WG_SRC", "10.14.0.2"),
     "LATENCY_TARGET": "1.1.1.1",                 # 隧道延迟实测目标
     "SWITCH_WAIT": 8,                            # 切换后等待握手秒数
     "PROBE_TIMEOUT": 2.5,
@@ -65,6 +72,17 @@ G = {
     "EVENT_KEEP": 3000,
     "HIT_KEEP": 2000,
     "SERIES_KEEP": 120,
+    "LATENCY_KEEP": 150,                         # 隧道延迟历史采样点上限(×PING_EVERY≈37min)
+    "JOURNAL_MAX": 400,                          # 日志查看器单次最多取回行数
+    "CLIENT_KEEP": 512,                          # 设备观测表最多跟多少个客户端
+    "CLIENT_ACTIVE": 180,                        # 最近 N 秒内发过 DNS 查询算"活跃设备"
+    "DNS_TEST_TIMEOUT": 4.0,                     # 单次 DNS 探测超时(秒)
+    "LOG_UNITS": {                               # 日志查看器白名单：只允许读这些源，杜绝任意 unit 注入
+        "dnsmasq": {"label": "DNS 解析(dnsmasq)", "unit": "dnsmasq.service"},
+        "wireguard": {"label": "隧道(wg-quick)", "unit": "wg-quick@wg0.service"},
+        "panel": {"label": "面板(gw-admin)", "unit": "gw-admin.service"},
+        "lists": {"label": "数据源更新日志", "file": P["LIST_LOG"]},
+    },
     "FLUSH_EVERY": 15,                           # 高频状态落盘节奏(秒)
     "SESSION_TTL": 7 * 24 * 3600,
     "LOGIN_WINDOW": 600,
@@ -75,7 +93,7 @@ D = {
     "PORT": int(os.environ.get("GW_PORT", "8080")),
     "DIST": os.environ.get("GW_DIST_DIR", "/opt/gw-admin/dist"),
     "DATA": os.environ.get("GW_DATA_DIR", "/opt/gw-admin/data"),
-    "MATRIX": os.environ.get("GW_MATRIX_URL", "https://nodes.tbw6.com:3333/data.js"),
+    "MATRIX": os.environ.get("GW_MATRIX_URL", "https://matrix.example.com:3333/data.js"),
     "COOKIE": "gw_admin_session",
 }
 API_VERSION = "1.0"
@@ -285,7 +303,8 @@ class Gateway:
     def list_counts(self):
         _, n, _ = sh("wc -l < %s" % P["CHINA_LIST"], shell=True)
         _, d, _ = sh("grep -c '^server=' %s" % P["GFW_CONF"], shell=True)
-        return int((n or 0).strip() or 0), int((d or 0).strip() or 0)
+        # 命令失败时 out 是空串：`(x or 0).strip()` 会拿 int 去 strip()，文件一旦被删就 500
+        return int((n or "").strip() or 0), int((d or "").strip() or 0)
 
     def has_mss_clamp(self):
         rc, _, _ = sh(["iptables", "-t", "mangle", "-C", "FORWARD", "-p", "tcp",
@@ -667,7 +686,7 @@ def do_switch(nid, kind="manual_switch", reason="用户操作"):
                 save_nodes(ns2, flush=True)
             push_event("node_down", "%s 握手超时(%ss)，已回滚到 %s" %
                        (node["name"], cost, prev["name"] if prev else "原节点"),
-                       source="节点管理", to=node["name"],
+                       source="节点管理", to=node["name"], cost=cost,
                        reason="%ss 内未完成握手，已回滚原 peer" % G["SWITCH_WAIT"])
             return fail("%s 握手超时(%ss)，已回滚" % (node["name"], cost), 502)
         n2, k2, ns2 = find_node(node["id"])
@@ -677,7 +696,8 @@ def do_switch(nid, kind="manual_switch", reason="用户操作"):
         GW.remeasure()
         GW.exit_ip = GW.check_exit_ip(cfg()["exitCheckUrl"]) or node["server"]
         push_event("node_up", "%s 握手成功，隧道恢复(耗时 %ss)" % (node["name"], cost),
-                   source="节点管理", to=node["name"], reason="握手完成")
+                   source="节点管理", to=node["name"], cost=cost,
+                   latency=GW.latency, loss=GW.latency_loss, reason="握手完成")
         return ok({"id": node["id"], "name": node["name"], "endpoint": endpoint,
                    "cost": cost, "handshake": hs})
 
@@ -771,6 +791,24 @@ def apply_rules():
 HITS = deque(maxlen=G["HIT_KEEP"])
 HIT_COUNT = {}
 DOMAIN_RE_CACHE = {}
+# 客户端观测：按来源 IP 累计所有 DNS 查询(不止命中规则的)，供「客户端设备」页使用
+CLIENTS = {}
+
+
+def bump_client(client, name, qtype):
+    c = CLIENTS.get(client)
+    if c is None:
+        if len(CLIENTS) >= G["CLIENT_KEEP"]:
+            # 上限是"同时被观测到的客户端数"，LAN 内远达不到；真到了就淘汰最久没说话的
+            CLIENTS.pop(min(CLIENTS, key=lambda k: CLIENTS[k]["last"]), None)
+        c = CLIENTS[client] = {"client": client, "count": 0, "proxy": 0, "direct": 0, "reject": 0,
+                               "types": {}, "domains": [], "first": int(time.time() * 1000), "last": 0}
+    c["count"] += 1
+    c["last"] = int(time.time() * 1000)
+    c["types"][qtype] = c["types"].get(qtype, 0) + 1
+    if not c["domains"] or c["domains"][-1] != name:
+        c["domains"].append(name)
+        del c["domains"][:-8]        # 只留最近 8 个查询名(留头不留尾会把它清空)
 
 
 def parse_query_line(line):
@@ -780,9 +818,13 @@ def parse_query_line(line):
     m = re.search(r"query\[(\w+)\]\s+(\S+)\s+from\s+(\S+)", line)
     if not m:
         return
-    name, client = m.group(2).rstrip("."), m.group(3)
+    qtype, name, client = m.group(1), m.group(2).rstrip("."), m.group(3)
     if "." not in name or "@" in name:
         return
+    # 回环来源是本机(面板自己测解析、dnsmasq 自检)，不是局域网设备，别混进设备列表
+    if client.startswith("127.") or client in ("::1", "localhost"):
+        return
+    bump_client(client, name, qtype)
     db = rules_db()
     hit = None
     for r in sorted(db["rows"], key=lambda x: x.get("priority", 0)):
@@ -795,6 +837,10 @@ def parse_query_line(line):
             break
     if not hit:
         return
+    c = CLIENTS.get(client)
+    if c is not None:
+        key = hit["action"] if hit["action"] in ("proxy", "direct") else "reject"
+        c[key] = c.get(key, 0) + 1
     now = int(time.time() * 1000)
     HITS.appendleft({"id": now, "time": now, "client": client, "query": name,
                      "action": hit["action"], "ruleId": hit["id"]})
@@ -832,8 +878,223 @@ def dnsmasq_tail_loop():
         time.sleep(5)
 
 
+# ============================================================ 观测辅助(DNS/设备/日志/数据源)
+# 这一节只做"读"：读文件、读邻居表、发一次 UDP 查询。不改隧道、不改规则，接口失败也不能抛异常。
+DNS_QTYPES = {"A": 1, "AAAA": 28}
+DNS_RCODE = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 4: "NOTIMP", 5: "REFUSED"}
+DOMAIN_OK_RE = re.compile(r"^[A-Za-z0-9._\-*]{1,253}$")
+NEIGH_STATES = ("REACHABLE", "STALE", "DELAY", "PROBE", "FAILED", "PERMANENT", "INCOMPLETE", "NOARP")
+
+
+def dns_views():
+    """解析对比的三个视图：本机分流结果 / 隧道上游 / 直连上游。"""
+    return [{"key": "local", "label": "本机 dnsmasq(分流结果)", "server": P["LOCAL_DNS"]},
+            {"key": "proxy", "label": "隧道上游", "server": G["GFW_DNS"]},
+            {"key": "direct", "label": "直连上游", "server": G["DIRECT_DNS"]}]
+
+
+def dns_read_name(msg, off, depth=0):
+    """解 DNS 报文里的名字(支持压缩指针)；压缩指针后即为段尾，递归深度封顶防构造报文绕圈。"""
+    parts = []
+    while off < len(msg):
+        ln = msg[off]
+        if ln == 0:
+            return ".".join(parts), off + 1
+        if ln & 0xC0 == 0xC0:
+            ptr = ((ln & 0x3F) << 8) | (msg[off + 1] if off + 1 < len(msg) else 0)
+            if depth < 4:
+                sub, _ = dns_read_name(msg, ptr, depth + 1)
+                if sub:
+                    parts.append(sub)
+            return ".".join(parts), off + 2
+        parts.append(msg[off + 1:off + 1 + ln].decode("ascii", "replace"))
+        off += 1 + ln
+    return ".".join(parts), off
+
+
+def dns_query(server, name, qtype="A", timeout=None):
+    """纯标准库发一次 UDP DNS 查询。
+    CT201 上没有 dig，getaddrinfo 又只会走 /etc/resolv.conf，没法"分别问三个上游"，
+    所以手搓报文：这是面板里唯一直接对外发 UDP 的观测路径，超时/异常一律降级成结构化结果。"""
+    t0 = time.time()
+    out = {"server": server, "qtype": qtype, "ok": False, "ips": [], "cname": None,
+           "rcode": None, "truncated": False, "ms": None, "error": None}
+    try:
+        tid = secrets.randbelow(65536)
+        pkt = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
+        pkt += b"".join(bytes([len(p)]) + p.encode("ascii", "ignore")
+                        for p in name.strip(".").split(".") if p) + b"\x00"
+        pkt += struct.pack(">HH", DNS_QTYPES[qtype], 1)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(timeout or G["DNS_TEST_TIMEOUT"])
+            s.sendto(pkt, (server, 53))
+            data, _ = s.recvfrom(4096)
+        finally:
+            s.close()
+    except Exception as e:  # noqa: BLE001 - 上游不可达是观测结论，不是服务端故障
+        out["error"] = "%s: %s" % (type(e).__name__, str(e)[:80])
+        out["ms"] = round((time.time() - t0) * 1000)
+        return out
+    out["ms"] = round((time.time() - t0) * 1000)
+    if len(data) < 12:
+        out["error"] = "响应过短"
+        return out
+    flags, qdcount, ancount = struct.unpack(">HHH", data[2:8])
+    out["rcode"] = DNS_RCODE.get(flags & 0xF, str(flags & 0xF))
+    out["truncated"] = bool(flags & 0x0200)
+    off = 12
+    for _ in range(max(0, qdcount)):                     # 跳过问题段(名字 + 类型 + 类)
+        _, off = dns_read_name(data, off)
+        off += 4
+    for _ in range(min(20, max(0, ancount))):            # 资源记录
+        _, off = dns_read_name(data, off)
+        if off + 10 > len(data):
+            break
+        rtype, _, _, rdlen = struct.unpack(">HHIH", data[off:off + 10])
+        off += 10
+        rdata = data[off:off + rdlen]
+        off += rdlen
+        if rtype == 1 and len(rdata) == 4:
+            out["ips"].append(socket.inet_ntoa(rdata))
+        elif rtype == 28 and len(rdata) == 16:
+            out["ips"].append(socket.inet_ntop(socket.AF_INET6, rdata))
+        elif rtype == 5 and out["cname"] is None:
+            out["cname"], _ = dns_read_name(data, off - rdlen)
+    out["ok"] = out["rcode"] == "NOERROR"
+    return out
+
+
+def dns_matches(name):
+    """这个域名会被哪条启用规则接住(与 parse_query_line 同一套匹配语义，只算不改)。"""
+    low = name.lower().rstrip(".")
+    hits = []
+    for r in sorted(rules_db()["rows"], key=lambda x: x.get("priority", 0)):
+        if r.get("type") != "domain" or not r.get("enabled"):
+            continue
+        pat = str(r["pattern"]).lower().lstrip("*").lstrip(".")
+        if pat and (low == pat or low.endswith("." + pat)):
+            hits.append({"id": r["id"], "pattern": r["pattern"], "action": r["action"],
+                         "priority": r.get("priority", 0)})
+    return hits
+
+
+def file_view(path, label):
+    """单个配置/数据文件的观测视图：存在性、行数、大小、修改时间。
+    行数只在小文件上算(512MB 的机器不能为了看行数把上百 MB 读进内存)。"""
+    exists = os.path.isfile(path)
+    size = os.path.getsize(path) if exists else 0
+    body = [l.strip() for l in read_file(path).splitlines()
+            if l.strip() and not l.strip().startswith("#")] if exists and size <= 2 * 1024 * 1024 else []
+    _, mtime, _ = sh(["stat", "-c", "%Y", path], timeout=6) if exists else (1, "", "")
+    return {"path": path, "label": label, "exists": exists, "bytes": size,
+            "counted": bool(exists and size <= 2 * 1024 * 1024),
+            "lines": len(body),
+            "serverLines": len([l for l in body if l.startswith("server=/")]),
+            "addressLines": len([l for l in body if l.startswith("address=/")]),
+            "mtime": int((mtime or "").strip() or 0) * 1000}
+
+
+def tail_lines(path, n):
+    """从文件尾部按字节窗口读 n 行(数据源日志可能几百 MB，不能整文件读进来)。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - n * 512))
+            data = f.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return []
+    return data.splitlines()[-n:]
+
+
+def journal_ts_ms(text):
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", text or "")
+    if not m:
+        return None
+    try:
+        return int(time.mktime(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")) * 1000)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def unit_state(unit):
+    act = sh(["systemctl", "is-active", unit], timeout=6)[1].strip()
+    en = sh(["systemctl", "is-enabled", unit], timeout=6)[1].strip()
+    return act.split(";")[0], en.split(";")[0]
+
+
+def lan_neighbors():
+    """邻居表里的下挂设备：排除隧道接口，只保留有链路层地址的条目。"""
+    _, out, _ = sh(["ip", "-4", "neigh", "show"])
+    rows = {}
+    for ln in (out or "").splitlines():
+        p = ln.split()
+        if not p or "dev" not in p or p[0].count(".") != 3:
+            continue
+        dev = p[p.index("dev") + 1] if len(p) > p.index("dev") + 1 else ""
+        if dev == P["WG_IF"]:
+            continue
+        rows[p[0]] = {"ip": p[0], "dev": dev,
+                      "mac": p[p.index("lladdr") + 1] if "lladdr" in p else None,
+                      "state": p[-1] if p[-1] in NEIGH_STATES else ""}
+    return rows
+
+
+def dnsmasq_leases():
+    """dnsmasq 租约(只有配了 DHCP 才有)：格式 "到期 时间戳 IP MAC 主机名 客户端标识"。"""
+    rows = {}
+    for ln in read_file(P["DNS_LEASES"]).splitlines():
+        p = ln.split()
+        if len(p) < 5:
+            continue
+        rows[p[2]] = {"ip": p[2], "mac": p[3], "hostname": p[4] if p[4] != "*" else None,
+                      "expires": int(p[0]) * 1000 if p[0].isdigit() else None}
+    return rows
+
+
+def is_ip(s):
+    try:
+        socket.inet_pton(socket.AF_INET6 if ":" in s else socket.AF_INET, s)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def next_cron_at(hhmm):
+    """下一次数据源更新的时刻(ms)：cron 只有一行"分 时"，按今天/明天推算。"""
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(hhmm) or "")
+    if not m:
+        return None
+    now = time.localtime()
+    due = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                       int(m.group(1)), int(m.group(2)), 0, 0, 0, -1))
+    return int((due + (86400 if due < time.time() else 0)) * 1000)
+
+
+SWITCH_TYPES = ("manual_switch", "auto_switch", "node_up", "node_down", "self_heal")
+SWITCH_TRIGGERS = {"manual_switch": "手动", "auto_switch": "自动自愈", "self_heal": "自动自愈"}
+
+
+def switch_result(e):
+    """把一条"结果事件"翻译成切换结论：成功 / 失败 / 已回滚。
+    只读事件文本里的既有措辞，不改自愈线程写的消息，避免动到切换判定。"""
+    if not e:
+        return "pending"
+    msg = e.get("message") or ""
+    if e["type"] == "node_up":
+        return "success"
+    if e["type"] == "node_down":
+        return "rollback" if "回滚" in msg else "fail"
+    if e["type"] == "self_heal":
+        if "成功" in msg:
+            return "success"
+        return "rollback" if "回滚" in msg else "fail"
+    return "info"
+
+
 # ============================================================ 采样 / 后台线程
 TRAFFIC = {"rate_up": 0.0, "rate_down": 0.0, "total_rx": 0, "total_tx": 0, "series": []}
+LATENCY = {"series": []}
 CPU_PREV = {}
 _seq_ev = 0
 
@@ -909,6 +1170,19 @@ def traffic_loop():
             S.set_mem("series.json", list(series))
 
 
+def sample_latency():
+    """把每次隧道实测延迟记进历史环形缓冲：延迟曲线只在"真的 ping 过"的点上出样，
+    不拿 2s 采样点插值，否则曲线会把一次 15s 的实测抹平成一条直线。"""
+    with LOCK:
+        if not LATENCY["series"]:
+            LATENCY["series"] = list(S.load("latency.json", []))[-G["LATENCY_KEEP"]:]
+        LATENCY["series"].append({"t": int(time.time() * 1000),
+                                  "ms": round(GW.latency, 1) if GW.latency is not None else None,
+                                  "loss": GW.latency_loss})
+        del LATENCY["series"][:-G["LATENCY_KEEP"]]
+        S.set_mem("latency.json", list(LATENCY["series"]))
+
+
 def health_loop():
     last_probe = last_ping = last_heal = 0
     last_exit = 0
@@ -922,6 +1196,7 @@ def health_loop():
             if time.time() - last_ping >= G["PING_EVERY"]:
                 last_ping = time.time()
                 GW.remeasure()
+                sample_latency()
             if time.time() - last_exit > 600:
                 last_exit = time.time()
                 ip = GW.check_exit_ip(cfg()["exitCheckUrl"])
@@ -1239,7 +1514,9 @@ def routes_table():
             rows = [n for n in rows if kw in " ".join(
                 str(n.get(k, "")) for k in ("name", "server", "city", "country")).lower()]
         rows.sort(key=lambda n: (not n.get("current"), n["delay"] if n.get("delay") is not None else 1e9))
-        return ok(dict(paginate([node_view(n) for n in rows], q), groups=groups))
+        return ok(dict(paginate([node_view(n) for n in rows], q), groups=groups,
+                       # 矩阵地址由后端说了算：前端常量只剩兜底展示作用
+                       nodeSource=cfg().get("nodeSource") or D["MATRIX"]))
     R.append(["GET", r"^/node/list$", r_node_list])
 
     def r_node_add(q, body, m):
@@ -1508,7 +1785,7 @@ def routes_table():
                    "gatewayIp": " / ".join("%s (%s)" % (a, d) for a, d in addrs) or "—",
                    "dnsMode": "dnsmasq 分流 (53) + 面板下发 97-panel.conf"
                               + ("，查询日志已开启" if cfg().get("queryLog") else ""),
-                   "listUpdatedAt": int((mtime or 0).strip() or 0) * 1000,
+                   "listUpdatedAt": int((mtime or "").strip() or 0) * 1000,
                    "bootAt": int((time.time() - up) * 1000),
                    "bootAtText": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - up)),
                    "wgStatus": "up" if GW.dump().get("up") else "down",
@@ -1685,7 +1962,263 @@ def routes_table():
                    "autoswitch": autoswitch(), "lastSwitch": S.load("last_switch.json", {"t": 0})["t"]})
     R.append(["GET", r"^/system/tunnel$", r_tunnel])
 
-    # EXTENSION_POINT: DNS 明细/终端设备列表/协议流量拆分等接口在此追加
+    # ---- 延迟历史(仪表盘曲线) ----
+    def r_latency(q, b, m):
+        with LOCK:
+            series = list(LATENCY["series"]) or list(S.load("latency.json", []))
+        vals = [s["ms"] for s in series if s.get("ms") is not None]
+        return ok({"series": series[-G["LATENCY_KEEP"]:],
+                   "current": GW.latency, "loss": GW.latency_loss,
+                   "target": cfg()["latencyTarget"], "every": G["PING_EVERY"],
+                   "measuredAt": int(GW.measured_at * 1000),
+                   "stats": {"samples": len(vals), "min": min(vals) if vals else None,
+                             "max": max(vals) if vals else None,
+                             "avg": round(sum(vals) / len(vals), 1) if vals else None,
+                             "lossSamples": len([s for s in series if s.get("loss")]),
+                             "windowSec": len(series) * G["PING_EVERY"]}})
+    R.append(["GET", r"^/dashboard/latency$", r_latency])
+
+    # ---- DNS 管理 ----
+    def r_dns_overview(q, b, m):
+        china, gfw = GW.list_counts()
+        _, ver, _ = sh(["dnsmasq", "--version"], timeout=8)
+        act, en = unit_state("dnsmasq")
+        main_txt = read_file(P["DNS_MAIN"])
+        files = [file_view(P["PANEL_CONF"], "面板下发(分流规则页)"),
+                 file_view(P["CUSTOM_CONF"], "手工补充域名(不被 cron 覆盖)"),
+                 file_view(P["GFW_CONF"], "gfwlist 生成(cron 每日更新)")]
+        db = rules_db()
+        return ok({"views": dns_views(),
+                   "listPath": P["CHINA_LIST"],
+                   "service": {"active": act, "enabled": en, "listening": act == "active",
+                               "version": (ver or "").splitlines()[0][:60] if ver else ""},
+                   "queryLog": bool(cfg().get("queryLog")),
+                   "baseUpstreams": re.findall(r"^server=([\d.]+)$", main_txt, re.M),
+                   "proxyUpstream": G["GFW_DNS"], "directUpstream": G["DIRECT_DNS"],
+                   "local": "%s:53" % P["LOCAL_DNS"],
+                   "counts": {"chinaIp": china, "gfwDomain": gfw,
+                              "panelDomain": files[0]["serverLines"] + files[0]["addressLines"],
+                              "customDomain": files[1]["serverLines"],
+                              "ruleDomain": len([r for r in db["rows"]
+                                                 if r.get("type") == "domain" and r.get("enabled")]),
+                              "ruleIp": len([r for r in db["rows"]
+                                             if r.get("type") in ("ip", "geoip") and r.get("enabled")])},
+                   "files": files,
+                   "observed": {"hitsTracked": len(HITS), "clients": len(CLIENTS)}})
+    R.append(["GET", r"^/dns/overview$", r_dns_overview])
+
+    def r_dns_query(q, b, m):
+        body = b or {}
+        name = str(q.get("domain") or body.get("domain") or "").strip().strip(".")
+        if not name or not DOMAIN_OK_RE.match(name):
+            return fail("域名格式不正确")
+        qtype = str(q.get("type") or body.get("type") or "A").upper()
+        if qtype not in DNS_QTYPES:
+            return fail("只支持 A / AAAA 查询")
+        view = str(q.get("view") or body.get("view") or "all")
+        rows = []
+        for v in dns_views():
+            if view in ("all", v["key"]):
+                rows.append(dict(dns_query(v["server"], name, qtype), key=v["key"], label=v["label"]))
+        push_event("sys_op", "DNS 解析测试 %s(%s)" % (name, qtype), source="DNS 管理",
+                   detail="; ".join("%s → %s" % (r["label"],
+                                                 ",".join(r["ips"]) if r["ok"] and r["ips"]
+                                                 else (r["error"] or r["rcode"] or "无记录"))
+                                    for r in rows)[:500])
+        return ok({"domain": name, "type": qtype, "results": rows, "matches": dns_matches(name)})
+    R.append(["GET", r"^/dns/query$", r_dns_query])
+
+    def r_dns_hits(q, b, m):
+        try:
+            n = max(1, min(G["HIT_KEEP"], int(q.get("limit") or 80)))
+        except Exception:  # noqa: BLE001
+            n = 80
+        with LOCK:
+            rows = list(HITS)[:n]
+        return ok({"rows": rows, "clients": len(CLIENTS), "tracked": G["HIT_KEEP"]})
+    R.append(["GET", r"^/dns/hits$", r_dns_hits])
+
+    # ---- 客户端设备 ----
+    def r_client_list(q, b, m):
+        neigh, leases = lan_neighbors(), dnsmasq_leases()
+        now_ms = int(time.time() * 1000)
+        rows = []
+        for ip in set(neigh) | set(leases) | set(CLIENTS):
+            if not is_ip(ip):
+                continue
+            c, lease, base = CLIENTS.get(ip) or {}, leases.get(ip) or {}, neigh.get(ip) or {}
+            last = c.get("last") or None
+            rows.append({"ip": ip, "dev": base.get("dev"), "mac": base.get("mac") or lease.get("mac"),
+                         "neighState": base.get("state"), "hostname": lease.get("hostname"),
+                         "leaseExpires": lease.get("expires"),
+                         "queries": c.get("count", 0), "proxy": c.get("proxy", 0),
+                         "direct": c.get("direct", 0), "reject": c.get("reject", 0),
+                         "types": c.get("types") or {},
+                         "recent": list(reversed(c.get("domains") or []))[:6],
+                         "lastQuery": last, "firstSeen": c.get("first"),
+                         "idle": max(0, (now_ms - last) // 1000) if last else None})
+        for r in rows:
+            r["active"] = bool(r["idle"] is not None and r["idle"] <= G["CLIENT_ACTIVE"])
+        if q.get("active"):                        # 过滤要在分页前做，否则每页条数会缩水
+            rows = [r for r in rows if r["active"]]
+        kw = str(q.get("keyword") or "").lower()
+        if kw:
+            rows = [r for r in rows if kw in " ".join(
+                [str(r.get("ip") or ""), str(r.get("mac") or ""), str(r.get("hostname") or ""),
+                 " ".join(r["recent"])]).lower()]
+        rows.sort(key=lambda r: (-r["queries"], r["ip"]))
+        return ok(dict(paginate(rows, q),
+                       stat={"total": len(rows), "active": len([r for r in rows if r["active"]]),
+                             "activeWindow": G["CLIENT_ACTIVE"],
+                             "neigh": len(neigh), "leases": len(leases),
+                             "quiet": len([r for r in rows if not r["queries"]]),
+                             "proxyTotal": sum(r["proxy"] for r in rows),
+                             "directTotal": sum(r["direct"] for r in rows)}))
+    R.append(["GET", r"^/client/list$", r_client_list])
+
+    # ---- 切换历史 ----
+    def r_switch_history(q, b, m):
+        def record(attempt, outcome):
+            e = attempt or outcome
+            # 事件 time 是毫秒，cost 统一换算成秒(与事件里自带的 cost 字段同一单位)
+            cost = (outcome or {}).get("cost")
+            if cost is None and attempt and outcome:
+                cost = round(max(0, outcome["time"] - attempt["time"]) / 1000, 1)
+            return {"id": e["id"], "at": e["time"],
+                    "trigger": SWITCH_TRIGGERS.get(e.get("type"), "隧道事件"),
+                    "from": e.get("from") or (outcome or {}).get("from"),
+                    "to": e.get("to") or (outcome or {}).get("to"),
+                    "reason": e.get("reason") or (outcome or {}).get("reason") or "",
+                    "result": switch_result(outcome),
+                    "cost": cost, "latency": (outcome or {}).get("latency"),
+                    "loss": (outcome or {}).get("loss"),
+                    "attemptMsg": (attempt or {}).get("message") or "",
+                    "outcomeMsg": (outcome or {}).get("message") or ""}
+        pending, rows, done = {}, [], {}
+        for e in reversed(read_events()):      # read_events 是新→旧，配对必须按时间正序走
+            if e.get("type") not in SWITCH_TYPES:
+                continue
+            # 不带 to 的 node_down/node_up 是探测判故障/恢复，不是切换动作；只有"自愈没跑成"
+            # 这类没有目标节点的 self_heal 才算一次切换尝试，否则切换历史会被探测噪声填满。
+            if not e.get("to") and e.get("type") != "self_heal":
+                continue
+            to = e.get("to")
+            if e["type"] in ("manual_switch", "auto_switch"):
+                if to and to in pending:
+                    rows.append(record(pending.pop(to), None))
+                if to:
+                    pending[to] = e
+                else:
+                    rows.append(record(e, None))
+            elif to and to in pending:
+                rows.append(record(pending.pop(to), e))
+                done[to] = e["time"]
+            elif to and e["type"] == "self_heal" and done.get(to, 0) >= e["time"] - 60000:
+                continue        # 同一次切换的"自愈成功"汇总事件，已由发起+握手段占一行，不重复展示
+            else:
+                rows.append(record(None, e))
+        rows += [record(e, None) for e in pending.values()]
+        rows.sort(key=lambda r: r["at"], reverse=True)
+        if q.get("result"):
+            rows = [r for r in rows if r["result"] == q["result"]]
+        kw = str(q.get("keyword") or "").lower()
+        if kw:
+            rows = [r for r in rows if kw in " ".join(
+                str(r.get(k) or "") for k in ("from", "to", "reason", "attemptMsg", "outcomeMsg")).lower()]
+        costs = [r["cost"] for r in rows if r.get("cost") is not None]
+        cur = current_node()
+        return ok(dict(paginate(rows, q),
+                       summary={"total": len(rows),
+                                "success": len([r for r in rows if r["result"] == "success"]),
+                                "fail": len([r for r in rows if r["result"] in ("fail", "rollback")]),
+                                "pending": len([r for r in rows if r["result"] == "pending"]),
+                                "avgCost": round(sum(costs) / len(costs), 1) if costs else None},
+                       current=cur["name"] if cur else None,
+                       lastSwitchAt=int(S.load("last_switch.json", {"t": 0})["t"] * 1000),
+                       autoswitch=autoswitch()))
+    R.append(["GET", r"^/switch/history$", r_switch_history])
+
+    # ---- 日志查看器 ----
+    def r_log_units(q, b, m):
+        out = []
+        for key, u in G["LOG_UNITS"].items():
+            if u.get("unit"):
+                act, en = unit_state(u["unit"])
+                out.append({"key": key, "label": u["label"], "kind": "journal", "unit": u["unit"],
+                            "active": act, "enabled": en})
+            else:
+                fv = file_view(u["file"], u["label"])
+                out.append({"key": key, "label": u["label"], "kind": "file", "file": fv,
+                            "active": "active" if fv["exists"] else "absent", "enabled": "-"})
+        return ok(out)
+    R.append(["GET", r"^/system/log-units$", r_log_units])
+
+    def r_sys_logs(q, b, m):
+        key = q.get("unit") or "dnsmasq"
+        u = G["LOG_UNITS"].get(key)
+        if not u:
+            return fail("日志源不在白名单内: %s" % key)
+        try:
+            want = max(20, min(G["JOURNAL_MAX"], int(q.get("lines") or 200)))
+        except Exception:  # noqa: BLE001
+            want = 200
+        kw = str(q.get("keyword") or "")[:64].lower()
+        if u.get("unit"):
+            rc, out, err = sh(["journalctl", "-u", u["unit"], "-n", str(want * 3),
+                               "--no-pager", "-o", "short-iso"], timeout=25)
+            if rc != 0:
+                return fail("journalctl 读取失败: " + (err or out).strip()[:180])
+            raw, source = out.splitlines(), u["unit"]
+        else:
+            raw, source = tail_lines(u["file"], want * 3), u["file"]
+        rows = []
+        for ln in raw:
+            if kw and kw not in ln.lower():
+                continue
+            if u.get("unit"):
+                head, _, rest = ln.partition(" ")     # short-iso: 时间戳 与 其余内容分开显示
+                rows.append({"t": journal_ts_ms(ln), "head": head, "text": (rest or ln)[:400]})
+            else:
+                rows.append({"t": None, "head": "", "text": ln[:400]})
+        rows.reverse()                         # 一律最新在上，和事件页一致
+        return ok({"unit": key, "label": u["label"], "source": source, "lines": rows[:want],
+                   "requested": want, "matched": len(rows), "scanned": len(raw)})
+    R.append(["GET", r"^/system/logs$", r_sys_logs])
+
+    # ---- 数据源(国内 IP / gfwlist / 节点矩阵) ----
+    def r_list_status(q, b, m):
+        china, gfw = GW.list_counts()
+        ns = node_store()
+        files = [file_view(P["CHINA_LIST"], "国内 IP 明细表(策略路由用)"),
+                 file_view(P["GFW_CONF"], "gfwlist 域名(dnsmasq 分流)"),
+                 file_view(P["CUSTOM_CONF"], "手工补充域名"),
+                 file_view(P["PANEL_CONF"], "面板下发域名"),
+                 file_view(P["UPDATE_LISTS"], "更新脚本"),
+                 file_view(P["CRON_LISTS"], "定时任务"),
+                 file_view(P["LIST_LOG"], "更新日志")]
+        return ok({"counts": {"chinaIp": china, "gfwDomain": gfw},
+                   "files": files, "cronAt": cron_time(), "cronNext": next_cron_at(cron_time()),
+                   "scriptOk": os.access(P["UPDATE_LISTS"], os.X_OK),
+                   "logTail": tail_lines(P["LIST_LOG"], 40),
+                   "matrix": {"url": cfg().get("nodeSource") or D["MATRIX"], "total": ns.get("total", 0),
+                              "updatedAt": int(ns.get("updatedAt", 0)) * 1000,
+                              "builtAt": ns.get("builtAt"), "fetchInterval": G["MATRIX_FETCH_INTERVAL"]},
+                   "subs": subs()})
+    R.append(["GET", r"^/list/status$", r_list_status])
+
+    def r_list_update(q, b, m):
+        """手动跑一次既有的 update-lists.sh：只复用已验证过的下发路径，不在面板里重写下载逻辑。"""
+        rc, out, err = sh([P["UPDATE_LISTS"]], timeout=150)
+        china, gfw = GW.list_counts()
+        tail = [l[:300] for l in ((out + "\n" + err).strip().splitlines()[-15:])]
+        push_event("sys_op", "手动更新分流数据源：国内 IP %s 条 / 分流域名 %s 条(%s)" %
+                   (china, gfw, "成功" if rc == 0 else "脚本返回 rc=%s" % rc),
+                   source="数据源", detail="\n".join(tail[-6:])[:500])
+        return ok({"rc": rc, "china": china, "gfw": gfw, "log": tail},
+                  "数据源更新完成" if rc == 0 else "更新脚本返回非 0，详见更新日志")
+    R.append(["POST", r"^/list/update$", r_list_update])
+
+    # EXTENSION_POINT: 协议流量拆分/接口计数明细/更多日志源等观测接口在此追加
     return R
 
 

@@ -11,6 +11,8 @@ import { fmtBytes, fmtTime } from '@/utils/format'
 
 const store = useNodeStore()
 const sel = ref([])
+// 仓库里的常量是占位值，真实矩阵地址以接口回传为准
+const nodeSource = computed(() => store.nodeSource || APP.NODE_SOURCE_HOME)
 
 // ---- 编辑对话框 ----
 const dlg = reactive({ open: false, isEdit: false })
@@ -88,7 +90,7 @@ onActivated(() => { store.fetchList(); store.fetchSubs() })
     <div class="gw-card nl__srcbar">
       <el-icon><InfoFilled /></el-icon>
       节点主数据来源矩阵页
-      <el-link type="primary" underline="never" :href="APP.NODE_SOURCE_HOME" target="_blank">{{ APP.NODE_SOURCE_HOME }}</el-link>
+      <el-link type="primary" underline="never" :href="nodeSource" target="_blank">{{ nodeSource }}</el-link>
       <span class="gw-muted">· 自动切换按「同国家/城市优先」策略执行 (冷却 {{ SWITCH.COOLDOWN }}s)</span>
     </div>
 

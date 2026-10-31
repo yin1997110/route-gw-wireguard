@@ -10,6 +10,8 @@ export const useNodeStore = defineStore('nodes', () => {
   const rows = ref([])
   const total = ref(0)
   const loading = ref(false)
+  // 矩阵主数据地址以后端为准(仓库里的常量只是占位兜底)
+  const nodeSource = ref('')
   const query = reactive({ pageNum: 1, pageSize: PAGINATION.PAGE_SIZE, group: '', status: '', keyword: '' })
 
   const current = computed(() => rows.value.find((n) => n.current) || null)
@@ -27,6 +29,7 @@ export const useNodeStore = defineStore('nodes', () => {
       rows.value = data.rows
       total.value = data.total
       if (data.groups?.length) serverGroups.value = data.groups
+      if (data.nodeSource) nodeSource.value = data.nodeSource
     } finally { loading.value = false }
   }
 
@@ -73,7 +76,7 @@ export const useNodeStore = defineStore('nodes', () => {
   async function delSub(id) { await subApi.delSub(id); await fetchSubs() }
 
   return {
-    rows, total, loading, query, current, onlineCount, groups,
+    rows, total, loading, query, current, onlineCount, groups, nodeSource,
     fetchList, switchTo, save, remove, exportRows, importRows,
     startPoll, stopPoll,
     subs, fetchSubs, fetchSub, addSub, delSub

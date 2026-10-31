@@ -50,8 +50,8 @@ route-gw-deploy/
 │   └── peer-check.sh          核对 wg0.conf 的对端 与 隧道真实对端 是否分叉，在 201 上跑
 └── web/                       ← 管理面板
     ├── app/                   Vue3 + Element Plus 前端源码（含 CONTRACT.md / ITERATION.md / mock-server.js）
+    │   └── dist/              已经构建好的静态产物 —— 没有 Node 环境也能直接部署
     ├── server/gw_server.py    单文件后端，纯 Python 标准库，直接跑在 201 上
-    ├── dist/                  已经构建好的静态产物 —— 没有 Node 环境也能直接部署
     └── gw-admin.service       systemd 单元
 ```
 
@@ -62,7 +62,7 @@ route-gw-deploy/
 | `files/etc/**` | `/etc/**` | 网关配置，权限由 install.sh 设置（wg0.conf 600） |
 | `files/usr/local/bin/*.sh` | `/usr/local/bin/` | 755，install 时 `sed 's/\r$//'` 去 CRLF |
 | `web/server/gw_server.py` | `/opt/gw-admin/gw_server.py` | 后端本体 |
-| `web/dist/` | `/opt/gw-admin/dist/` | 前端静态产物 |
+| `web/app/dist/` | `/opt/gw-admin/dist/` | 前端静态产物（vite 构建输出，随包分发） |
 | `web/gw-admin.service` | `/etc/systemd/system/gw-admin.service` | `systemctl enable --now gw-admin` |
 | — | `/opt/gw-admin/data/*.json(l)` | **运行数据**（节点池/规则/订阅/事件/会话/状态），升级安装不动它 |
 
@@ -130,7 +130,9 @@ pct exec 202 -- bash /opt/setup-202.sh
 - **分流网关（201）**：三层配合 —— 策略路由规则 + 国内 IP 明细路由（IP 层）+ gfwlist 域名 DNS 劫持（域名层）。
   国内 IP 走 `eth0` 直连，其余走 `wg0`；202 的网关/DNS 都指向 201，所以 202 自动跟随分流。
 - **管理面板（也在 201）**：Vue3 前端（预构建静态产物）+ 单文件 Python 标准库后端 + systemd 常驻。
-  六个模块：仪表盘 / 节点管理 / 分流规则 / 自动切换与自愈 / 系统设置 / 事件日志。
+  左侧菜单 11 页：**仪表盘 / 节点管理 / 分流规则 / 自动切换与自愈 / DNS 管理 / 客户端设备 / 切换历史 /
+  日志查看 / 数据源 / 系统设置 / 事件日志**。前 6 页是可操作的日常刚需，后 5 页是观测面（只读，
+  或复用已经验证过的下发路径），负责把「解析走向、谁在上网、切换花了几秒、隧道哪一层出问题」摊开在屏上。
   节点主数据来自矩阵订阅源，换节点是「写 `wg0.conf` → `wg syncconf` → 等握手 → 实测 → 不达标就回滚」七步，
   失败不会把隧道留在坏状态。
 - **约束决定了形态**：201 只有 1 核 512MB、没有 node/npm/pip/nginx/jq/git。

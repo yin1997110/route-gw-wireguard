@@ -2,6 +2,7 @@
 node_modules/
 .vite/
 *.local
+# 注意：web/app/dist/ 是随包分发的预构建产物（201 上没有 Node），不要忽略
 
 # 运行期数据（面板的账号哈希/会话/节点池，永远不要提交）
 data/
@@ -18,9 +19,14 @@ wg*.conf.local
 *.log
 *.tmp
 update-lists.log
+.scratch/
 
 # 系统/编辑器
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# Python 缓存
+__pycache__/
+*.pyc

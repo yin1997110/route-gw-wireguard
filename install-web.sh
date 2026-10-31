@@ -41,9 +41,11 @@ python3 -m py_compile "$APP/gw_server.py"
 echo "  后端: $APP/gw_server.py ($(wc -c < "$APP/gw_server.py") bytes)"
 
 echo "[4/6] 投放前端静态产物"
-if [ -d "$WEB/dist" ] && [ -f "$WEB/dist/index.html" ]; then
+# 前端产物就是 vite 的构建输出 web/app/dist，随包分发，201 上没有 Node 不用重新构建
+DIST="$WEB/app/dist"
+if [ -d "$DIST" ] && [ -f "$DIST/index.html" ]; then
     rm -rf "$APP/dist.new"
-    cp -a "$WEB/dist" "$APP/dist.new"
+    cp -a "$DIST" "$APP/dist.new"
     rm -rf "$APP/dist.old"
     [ -d "$APP/dist" ] && mv "$APP/dist" "$APP/dist.old"
     mv "$APP/dist.new" "$APP/dist"
@@ -51,7 +53,7 @@ if [ -d "$WEB/dist" ] && [ -f "$WEB/dist/index.html" ]; then
     echo "  前端: $APP/dist ($(du -sh "$APP/dist" | cut -f1))"
 else
     [ -d "$APP/dist" ] && echo "  保留已有前端产物 $APP/dist" \
-        || { echo "  缺 web/dist，且本机无旧产物：先在开发机 npx vite build 再打包"; exit 1; }
+        || { echo "  缺 web/app/dist，且本机无旧产物：先在开发机 web/app 下 npx vite build 再打包"; exit 1; }
 fi
 
 echo "[5/6] systemd 常驻"

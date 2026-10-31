@@ -10,7 +10,7 @@ set -u
 
 CHINA_URL="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 GFW_URL="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
-GFW_DNS="162.252.172.57"
+GFW_DNS="198.51.100.53"
 
 CHINA_LIST="/etc/china_ip_list.txt"
 GFW_CONF="/etc/dnsmasq.d/99-gfw.conf"

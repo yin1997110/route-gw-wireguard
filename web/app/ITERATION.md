@@ -22,16 +22,17 @@
 
 ## 1. 常见改动配方
 
-### 1.1 新增一个面板页（例：DNS 管理）
+### 1.1 新增一个面板页（例：DNS 管理，已落地）
 
 | 步 | 文件 | 动作 |
 |---|---|---|
 | 1 | `src/views/dns/DnsManage.vue` | **新建**。顶部写 `<!-- 职责: ... -->`，含 `// EXTENSION_POINT:` 注释 |
 | 2 | `src/router/index.js` | 在 `appRoutes` 数组追加一条（`path/name/component/meta.title/meta.icon`），菜单自动生成，无需改 Sidebar |
 | 3 | `src/api/dns.js` | **新建**，只导出函数，URL 全部以此为前缀 `/dns/...` |
-| 4 | `src/store/dns.js` | **新建** Pinia setup-store，持有 list/query 与所有 action |
+| 4 | `src/store/dns.js` | **新建** Pinia setup-store，持有 list/query 与所有 action，定时器只住这里(`onActivated/onDeactivated` 起停) |
 | 5 | `src/constants/config.js` | 若有默认值/枚举，加 `DNS = {...}` 分组 |
 | 6 | `server/mock-server.js` | 在 `routes` 数组末尾登记对应端点 |
+| 7 | `web/server/gw_server.py` | 在 `routes_table()` 里登记**同名同结构**的端点（少这一步 = 上真机 404） |
 
 多标签页、侧栏菜单、面包屑都会自动出现（由 `router` + `TagsView` + `AppMain` 派生），**不要**去改这三个文件。
 
@@ -166,4 +167,32 @@
 
 - 自检探测 `/api/system/info` + `curl -f` 永远"通过"——未登录回的是 **HTTP 200 + `code:401`**。改成探首页 `<div id="app">` 和 `/api/user/info` 的 `code` 字段。
 - `GW_PANEL_PORT` 只改了提示文案，没传进服务的 `GW_PORT`。改为非默认端口时写 systemd drop-in（`gw-admin.service.d/port.conf`），默认端口时删掉 drop-in。
+
+---
+
+## 6. v1.1 观测批（DNS 管理 / 终端设备 / 切换历史 / 日志查看 / 数据源 / 延迟曲线）
+
+六个只读观测功能，一次加 10 个端点、5 个视图、1 个公共组件。加之前先定了三条边界，后续再加观测页照这三条走：
+
+1. **不动切换与自愈**：新页面没有一条新的下发路径。唯一的写按钮（数据源「立即更新」）调的是网关上
+   本来就每天在跑的 `update-lists.sh`，前端只是把它已有的行为露出来。
+2. **mock 与真实后端同结构**：每个端点都写成「mock 的 `routes` + 后端的 `routes_table()`」两份，
+   并用同一段断言对拍过（分页字段、单位、空值语义必须一致），否则开发机好看、上真机就空表。
+3. **只读也要防注入**：日志单元走后端白名单 `G.LOG_UNITS`，DNS 查询域名走正则校验，
+   外部命令一律 `sh([...], shell=False)`，绝不把用户输入拼进 shell 字符串。
+
+这一批里只有连着真网关/真实事件流才会暴露的问题，都改掉了：
+
+| # | 问题 | 现象 | 根因与修法 |
+|---|---|---|---|
+| 1 | 切换历史时间/耗时单位错 | 时间显示成 1970，平均耗时 6880.9「秒」 | 事件 `time` 本来就是**毫秒**；`at` 直接取 `e["time"]`，`cost` 用 `(结果-发起)/1000` 保留一位。前端一律按毫秒 `fmtTime` |
+| 2 | 切换历史被探测噪声填满 | 一次切换出现 3~4 行，"成功"和"无结果"混在一起 | 不带 `to` 的 `node_down/node_up` 是判故障/恢复探测，不是切换动作 → 排除；带 `to` 的 `self_heal` 若是 60s 内已配对切换的汇总 → 也排除（只有"自愈未执行"这种无 `to` 的保留为一次失败） |
+| 3 | 终端设备列表把面板自己算一台设备 | 局域网设备多出一个 `127.0.0.1` | `parse_query_line` 过滤回环来源：本机探测和 dnsmasq 自检不是局域网设备 |
+| 4 | 分组筛选器缺项 | 节点数千，切到第 2 页后下拉里只剩本页的分组 | `/api/node/list` 额外回全量 `groups`（不随分页变化），前端优先用它、缺失时才按本页推导 |
+| 5 | 矩阵地址写死在前端常量 | 仓库脱敏后页面显示占位地址，用户以为数据源坏了 | `/api/node/list` 回 `nodeSource`（后端 `cfg()` 优先，兜底 `D["MATRIX"]`），前端常量只当兜底文案 |
+| 6 | 日志查看器出现双时间戳 | 每行开头两个时间 | journal 单元由后端拆出 `t`/`text`，视图只渲染 `t`；文件单元（lists 日志）`t` 为 null 显示 `—`，不再把整行原文再拼一遍 |
+| 7 | mock 里 `nodeSource`/`latency`/`loss` 与真机不一致 | 演示页看着对，接口对拍失败 | mock 的事件补 `ago` 回填时间、逐事件带自己的 `latency/loss`（不再抄当前节点），配对逻辑与后端同源 |
+
+> 加观测页时最容易犯的错：**在视图里直接起 `setInterval`**。轮询一律进 store，
+> 页面用 `onActivated` 起、`onDeactivated` 停（keep-alive 下 `onUnmounted` 根本不会触发）。
 

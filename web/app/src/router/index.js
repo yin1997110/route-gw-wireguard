@@ -43,6 +43,36 @@ const appRoutes = [
         meta: { title: '自动切换', icon: 'Switch' }
       },
       {
+        path: 'dns',
+        name: 'DnsManage',
+        component: () => import('@/views/dns/DnsManage.vue'),
+        meta: { title: 'DNS 管理', icon: 'Position' }
+      },
+      {
+        path: 'clients',
+        name: 'ClientList',
+        component: () => import('@/views/clients/ClientList.vue'),
+        meta: { title: '终端设备', icon: 'Monitor' }
+      },
+      {
+        path: 'lists',
+        name: 'DataSource',
+        component: () => import('@/views/lists/DataSource.vue'),
+        meta: { title: '数据源', icon: 'Files' }
+      },
+      {
+        path: 'switchlog',
+        name: 'SwitchHistory',
+        component: () => import('@/views/switchlog/SwitchHistory.vue'),
+        meta: { title: '切换历史', icon: 'Sort' }
+      },
+      {
+        path: 'logs',
+        name: 'LogViewer',
+        component: () => import('@/views/logs/LogViewer.vue'),
+        meta: { title: '日志查看', icon: 'Notebook' }
+      },
+      {
         path: 'events',
         name: 'EventLog',
         component: () => import('@/views/events/EventLog.vue'),

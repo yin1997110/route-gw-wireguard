@@ -1,11 +1,13 @@
-<!-- 职责: 仪表盘页。实时速率/流量/当前节点/资源占用 + 时序曲线。业务数据全部来自 system store。 -->
+<!-- 职责: 仪表盘页。实时速率/流量/当前节点/资源占用 + 吞吐曲线 + 隧道延迟历史曲线。业务数据全部来自 system store。 -->
 <script setup>
 import { computed, onActivated, onDeactivated } from 'vue'
 import { useSystemStore } from '@/store/system'
 import SpeedChart from '@/components/SpeedChart.vue'
+import LatencyChart from '@/components/LatencyChart.vue'
 import DelayBadge from '@/components/DelayBadge.vue'
 import StatusTag from '@/components/StatusTag.vue'
-import { fmtBytes, fmtSpeed, fmtDuration } from '@/utils/format'
+import { fmtBytes, fmtSpeed, fmtDuration, fmtTime } from '@/utils/format'
+import { DELAY } from '@/constants/config'
 
 const sys = useSystemStore()
 
@@ -17,8 +19,15 @@ const cards = computed(() => [
 ])
 
 // keep-alive 下用激活钩子，离开页面即停掉实时轮询
-onActivated(() => { sys.fetchOverview(); sys.startRealtime() })
+onActivated(() => { sys.fetchOverview(); sys.fetchLatency(); sys.startRealtime() })
 onDeactivated(() => sys.stopRealtime())
+
+const latRows = computed(() => [
+  { label: '当前', value: sys.latencyHead.current == null ? '—' : `${Math.round(sys.latencyHead.current)} ms` },
+  { label: '均值', value: sys.latencyStats.avg == null ? '—' : `${sys.latencyStats.avg} ms` },
+  { label: '最低', value: sys.latencyStats.min == null ? '—' : `${sys.latencyStats.min} ms` },
+  { label: '最高', value: sys.latencyStats.max == null ? '—' : `${sys.latencyStats.max} ms` }
+])
 </script>
 
 <template>
@@ -83,6 +92,33 @@ onDeactivated(() => sys.stopRealtime())
         </div>
       </el-col>
     </el-row>
+    <el-row :gutter="12" style="margin-top: 12px">
+      <el-col :xs="24" :md="16">
+        <div class="gw-card db__chart db__chart--lat">
+          <div class="gw-flex gw-flex--between gw-mb">
+            <span class="gw-card__title">隧道延迟历史</span>
+            <span class="gw-muted">
+              每 {{ sys.latencyHead.every || 15 }}s 实测一次 · 窗口 {{ sys.latencyStats.windowSec || 0 }}s ·
+              丢包点 {{ sys.latencyStats.lossSamples || 0 }} 个 · 最近实测 {{ fmtTime(sys.latencyHead.measuredAt, 'HH:mm:ss') }}
+            </span>
+          </div>
+          <LatencyChart :points="sys.latencyPoints" :warn="DELAY.BAD" height="200px" />
+        </div>
+      </el-col>
+      <el-col :xs="24" :md="8">
+        <div class="gw-card db__node db__node--lat">
+          <span class="gw-card__title gw-mb">延迟统计</span>
+          <ul class="db__kv">
+            <li v-for="r in latRows" :key="r.label"><span>{{ r.label }}</span><b class="gw-num">{{ r.value }}</b></li>
+            <li><span>实测目标</span><b class="gw-num">{{ sys.latencyHead.target || '—' }}</b></li>
+            <li><span>丢包率</span><b class="gw-num">{{ sys.latencyHead.loss ? `${Math.round(sys.latencyHead.loss * 100)}%` : '0%' }}</b></li>
+          </ul>
+          <div class="gw-muted db__lat-note">
+            曲线只在真实 ping 实测的点上出样，空闲隧道不会插值成直线；判自愈也只看这些读数。
+          </div>
+        </div>
+      </el-col>
+    </el-row>
     <!-- EXTENSION_POINT: 分流命中 Top 域名、按设备明细卡片在此追加 -->
   </div>
 </template>
@@ -98,6 +134,8 @@ onDeactivated(() => sys.stopRealtime())
 .db__label { font-size: 12px; color: var(--gw-text-2); }
 .db__value { font-size: 20px; font-weight: 700; line-height: 1.35; }
 .db__chart, .db__node { padding: 16px; min-height: 330px; }
+.db__chart--lat, .db__node--lat { min-height: 268px; }
+.db__lat-note { margin-top: 10px; font-size: 12px; line-height: 1.6; }
 .db__node-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 .db__flag { font-size: 26px; }
 .db__node-name { font-weight: 600; }

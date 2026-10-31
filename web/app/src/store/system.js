@@ -24,6 +24,19 @@ export const useSystemStore = defineStore('system', () => {
   }
   const overviewMeta = reactive({})   // todayUp/todayDown/monthUp... 平铺
 
+  // 隧道延迟历史：后端只在"真的 ping 过"的点上出样，这里整段取回，不拿 2s 轮询插值
+  const latencyPoints = ref([])
+  const latencyStats = ref({})
+  const latencyHead = ref({})
+  async function fetchLatency() {
+    try {
+      const d = await dashApi.getLatency()
+      latencyPoints.value = d.series
+      latencyStats.value = d.stats
+      latencyHead.value = { current: d.current, loss: d.loss, target: d.target, every: d.every, measuredAt: d.measuredAt }
+    } catch { /* 曲线取不到不打断仪表盘其余部分 */ }
+  }
+
   function startRealtime() {
     stopRealtime()
     poll()
@@ -38,7 +51,10 @@ export const useSystemStore = defineStore('system', () => {
       points.value.push({ t: d.t, up: d.up, down: d.down })
       if (points.value.length > REFRESH.CHART_WINDOW) points.value.shift()
       // 概览(当前节点/流量/运行时长)随轮询低频刷新，避免节点卡片停在入场那一刻
-      if (++ticks % REFRESH.OVERVIEW_EVERY === 0) await fetchOverview()
+      if (++ticks % REFRESH.OVERVIEW_EVERY === 0) {
+        await fetchOverview()
+        fetchLatency()
+      }
     } catch { /* 轮询失败静默，等待下轮 */ }
   }
 
@@ -102,6 +118,7 @@ export const useSystemStore = defineStore('system', () => {
 
   return {
     overview, overviewMeta, points, live, fetchOverview, startRealtime, stopRealtime,
+    latencyPoints, latencyStats, latencyHead, fetchLatency,
     events, eventTotal, eventLoading, eventQuery, fetchEvents, clearEvents,
     sysInfo, fetchSysInfo, reload, restart, backup, restore,
     autoSwitch, fetchAutoSwitch, saveAutoSwitch, probeNow,
