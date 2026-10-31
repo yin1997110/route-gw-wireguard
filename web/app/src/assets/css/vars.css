@@ -1,0 +1,80 @@
+/* 职责: 全局设计 token。所有色值/阴影/圆角/动画参数唯一来源。
+   红线: 其他任何文件不允许硬编码颜色，只能 var(--gw-*)。
+   EXTENSION_POINT: 新 token(字号/密度等)加在这里，并在 settings.js applyTheme 关联。 */
+
+html.dark {
+  /* 底色层次: 页面底 → 卡片 → 悬浮层 */
+  --gw-bg: #0b1220;
+  --gw-bg-soft: #0f182b;
+  --gw-card: #141f36;
+  --gw-card-hover: #1a2743;
+  --gw-popup: #182743;
+  --gw-border: #23314e;
+  --gw-border-soft: #1c2942;
+  --gw-text-1: #e7ecf5;
+  --gw-text-2: #9fb0c9;
+  --gw-text-3: #5f7191;
+  --gw-accent: #4c9aff;
+  --gw-accent-contrast: #ffffff;
+  --gw-success: #2ecf7f;
+  --gw-warning: #f5b544;
+  --gw-danger: #ff6b6b;
+  --gw-info: #7da2c9;
+  --gw-shadow-1: 0 2px 10px rgb(0 0 0 / 0.35);
+  --gw-shadow-2: 0 8px 28px rgb(0 0 0 / 0.5);
+  --gw-chart-grid: #1f2c49;
+  --gw-scrollbar: #2a3a5e;
+  color-scheme: dark;
+}
+
+html.light {
+  --gw-bg: #f3f6fb;
+  --gw-bg-soft: #eef2f9;
+  --gw-card: #ffffff;
+  --gw-card-hover: #f6f9ff;
+  --gw-popup: #ffffff;
+  --gw-border: #dde5f0;
+  --gw-border-soft: #e8eef7;
+  --gw-text-1: #1d2b42;
+  --gw-text-2: #55657e;
+  --gw-text-3: #94a3b8;
+  --gw-accent: #4c9aff;
+  --gw-accent-contrast: #ffffff;
+  --gw-success: #1ba864;
+  --gw-warning: #d99a1e;
+  --gw-danger: #e35d5d;
+  --gw-info: #5f7ea6;
+  --gw-shadow-1: 0 2px 10px rgb(15 40 80 / 0.08);
+  --gw-shadow-2: 0 10px 30px rgb(15 40 80 / 0.12);
+  --gw-chart-grid: #e6ecf5;
+  --gw-scrollbar: #c6d2e4;
+  color-scheme: light;
+}
+
+:root {
+  /* 与主题无关的结构 token */
+  --gw-accent-soft: color-mix(in srgb, var(--gw-accent) 14%, transparent);
+  --gw-accent-line: color-mix(in srgb, var(--gw-accent) 40%, transparent);
+  --gw-radius-xs: 4px;
+  --gw-radius-sm: 8px;
+  --gw-radius-md: 12px;
+  --gw-radius-lg: 16px;
+  --gw-gap: 16px;
+  --gw-header-h: 52px;
+  --gw-tags-h: 40px;
+  --gw-sidebar-w: 216px;
+  --gw-sidebar-w-collapsed: 64px;
+  --gw-dur-fast: 0.15s;
+  --gw-dur: 0.25s;
+  --gw-dur-slow: 0.45s;
+  --gw-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --gw-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --gw-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* 主色梯度混合基色(settings.applyTheme 生成 Element 色阶时使用，避免 JS 内硬写色值) */
+  --gw-mix-black: #000000;
+  --gw-mix-white: #ffffff;
+  --gw-hover-scrim: rgb(0 0 0 / 0.18);
+  /* 登录页 */
+  --gw-login-w: 380px;
+  --gw-login-glow: 0 24px 70px -20px color-mix(in srgb, var(--gw-accent) 45%, transparent);
+}

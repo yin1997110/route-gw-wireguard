@@ -1,0 +1,26 @@
+# 依赖与构建
+node_modules/
+.vite/
+*.local
+
+# 运行期数据（面板的账号哈希/会话/节点池，永远不要提交）
+data/
+INITIAL_PASSWORD.txt
+*.bak
+
+# 真实机密
+privatekey
+wg*.conf.local
+.env.local
+.env.*.local
+
+# 日志与临时
+*.log
+*.tmp
+update-lists.log
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

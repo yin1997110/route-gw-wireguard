@@ -1,0 +1,4 @@
+# /etc/cron.d/route-lists — 每日 04:30 更新分流数据源
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 4 * * * root /usr/local/bin/update-lists.sh >> /var/log/update-lists.log 2>&1

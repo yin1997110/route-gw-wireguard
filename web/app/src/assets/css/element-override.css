@@ -1,0 +1,31 @@
+/* 职责: Element Plus 视觉微调，全部走 CSS 变量，不改结构行为。 */
+
+.el-table {
+  --el-table-border-color: var(--gw-border-soft);
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--gw-bg-soft);
+  --el-table-header-text-color: var(--gw-text-2);
+  --el-table-text-color: var(--gw-text-1);
+  --el-table-row-hover-bg-color: var(--gw-card-hover);
+  background: transparent;
+}
+.el-table th.el-table__cell { font-weight: 600; }
+.el-table .current-node-row td.el-table__cell {
+  background: color-mix(in srgb, var(--gw-accent) 10%, transparent) !important;
+}
+
+.el-dialog, .el-drawer {
+  border-radius: var(--gw-radius-lg);
+  background: var(--gw-popup);
+}
+.el-drawer__header { margin-bottom: 12px; }
+
+.el-card { --el-card-border-color: var(--gw-border-soft); border-radius: var(--gw-radius-md); }
+
+.el-menu { border-right: none !important; --el-menu-bg-color: transparent; }
+.el-tag { border-radius: var(--gw-radius-sm); }
+
+/* 拖拽排序行反馈 */
+.gw-drag-ghost { opacity: 0.35; }
+.gw-drag-chosen { cursor: grabbing; }

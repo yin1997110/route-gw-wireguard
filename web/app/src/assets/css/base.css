@@ -1,0 +1,59 @@
+/* 职责: 全局基础样式与公共布局类。颜色只允许 var(--gw-*)。 */
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; padding: 0; }
+body {
+  font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--gw-bg);
+  color: var(--gw-text-1);
+  font-size: 14px;
+  transition: background var(--gw-dur) var(--gw-ease);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--gw-scrollbar); border-radius: var(--gw-radius-xs); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- 公共布局类 ---- */
+.gw-page { padding: var(--gw-gap); }
+.gw-card {
+  background: var(--gw-card);
+  border: 1px solid var(--gw-border-soft);
+  border-radius: var(--gw-radius-md);
+  box-shadow: var(--gw-shadow-1);
+  transition: transform var(--gw-dur) var(--gw-ease-out),
+              box-shadow var(--gw-dur) var(--gw-ease-out),
+              background var(--gw-dur) var(--gw-ease);
+}
+.gw-card--hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--gw-shadow-2);
+  background: var(--gw-card-hover);
+}
+.gw-card__title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 15px; font-weight: 600; color: var(--gw-text-1);
+}
+.gw-card__title::before {
+  content: ""; width: 4px; height: 14px; border-radius: 2px;
+  background: var(--gw-accent);
+}
+.gw-flex { display: flex; align-items: center; }
+.gw-flex--between { justify-content: space-between; }
+.gw-flex--gap { gap: 10px; }
+.gw-mb { margin-bottom: var(--gw-gap); }
+.gw-muted { color: var(--gw-text-3); font-size: 12px; }
+.gw-num { font-family: "JetBrains Mono", "Consolas", monospace; font-variant-numeric: tabular-nums; }
+
+/* ---- 页面切换动画（平滑、克制） ---- */
+.page-enter-active { transition: opacity var(--gw-dur) var(--gw-ease), transform var(--gw-dur) var(--gw-ease-out); }
+.page-leave-active { transition: opacity var(--gw-dur-fast) linear; }
+.page-enter-from { opacity: 0; transform: translateY(8px); }
+.page-leave-to { opacity: 0; }
+
+/* ---- 移动端 ---- */
+@media (max-width: 768px) {
+  .gw-page { padding: 10px; }
+  :root { --gw-gap: 10px; }
+}

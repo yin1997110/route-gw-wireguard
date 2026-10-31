@@ -1,0 +1,22 @@
+# 职责: systemd 服务单元 —— 让管理面板随 LXC 201 常驻自启。
+# 说明: 面板要读写 /etc/dnsmasq.d/97-panel.conf 并调用 wg/ip/iptables/crontab，
+#       必须以 root 运行；单文件 Python 标准库服务，无外部依赖。
+[Unit]
+Description=Route-GW Admin Panel (gw-admin)
+Documentation=file:/opt/route-gw-deploy/WEB-DEPLOY.md
+After=network-online.target wg-quick@wg0.service dnsmasq.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gw-admin
+ExecStart=/usr/bin/python3 /opt/gw-admin/gw_server.py --serve
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+# 面板自身不产生大量日志，节流保护 512MB 小机器
+Nice=10
+SyslogIdentifier=gw-admin
+
+[Install]
+WantedBy=multi-user.target
