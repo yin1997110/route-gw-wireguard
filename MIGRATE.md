@@ -184,3 +184,6 @@ CT202 在 `192.168.1.0/24`（1 网段），J1900 在 `192.168.0.0/24`（0 网段
   `/etc/dnsmasq.d/99-gfw.conf` 并调用 `wg-route-up.sh`；`GW_GFW_DNS` 从 `/etc/default/route-gw` 读。
 - **AppArmor 持久化**：`/etc/apparmor.d/local/wg-quick` 在重启后仍由 apparmor 加载，已实测重启后
   `wg-quick` 能正常执行 PostUp。
+- **Go 工具优先 IPv6**：目标机若有全局 IPv6，`skopeo`/`docker` 等 Go 程序可能先连 IPv6 直连并被 reset。
+  可在 `/etc/gai.conf` 加一行 `precedence ::ffff:0:0/96 100`，测试时配合
+  `GODEBUG=netdns=cgo`；本方案只分流 IPv4，IPv6 泄漏仍需另行处理。
