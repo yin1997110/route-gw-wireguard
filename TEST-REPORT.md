@@ -140,4 +140,7 @@ http://192.168.0.125:8080/                       → 200
 1. J1900 的 `.125` 目前是 DHCP 获取；建议在 `192.168.0.1` 上做 DHCP 静态绑定。
 2. 本方案只分流 IPv4；J1900 和客户端若有 IPv6 默认路由，IPv6 流量仍直连上游。
 3. CT201 的 `wg-quick@wg0` / `gw-admin` 已 disable；不要和 J1900 同时启动（同一个 WG peer）。
-4. 面板登录密码与 CT201 相同；面板地址 `http://192.168.0.125:8080`。
+4. 面板账号 `admin`，地址 `http://192.168.0.125:8080`；迁移后为交付方便重置过密码，
+   登录后请在「系统设置 → 账号安全」改成自己的密码。忘记时可用
+   `sudo python3 /opt/gw-admin/gw_server.py --set-password admin '新密码'` 重置并
+   `sudo systemctl restart gw-admin`。

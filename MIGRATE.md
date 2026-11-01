@@ -176,8 +176,10 @@ CT202 在 `192.168.1.0/24`（1 网段），J1900 在 `192.168.0.0/24`（0 网段
 - **IPv6 泄漏**：本方案只分流 IPv4。目标机/客户端若有 IPv6 默认路由，IPv6 站点仍会直连上游，
   IPv6 能力强的应用可能绕过隧道。不需要 IPv6 时可在目标机加：
   `net.ipv6.conf.all.disable_ipv6=1`（客户端仍需自行处理）。
-- **面板密码/数据**：`/opt/gw-admin/data` 原样迁过来，管理员密码、节点池、规则、订阅、事件都还在；
-  登录地址变成 `http://192.168.0.125:8080`。
+- **面板密码/数据**：`/opt/gw-admin/data` 原样迁过来，节点池、规则、订阅、事件都还在；
+  登录地址变成 `http://192.168.0.125:8080`。如果旧密码已经忘记，用
+  `sudo python3 /opt/gw-admin/gw_server.py --set-password admin '新密码'` 重置，
+  再 `sudo systemctl restart gw-admin`（面板只存 PBKDF2 哈希，无法反查明文）。
 - **旧机回退**：先停新机 `wg-quick@wg0`，再在旧机
   `systemctl enable --now wg-quick@wg0 gw-admin`，否则两台会抢同一个 peer。
 - **cron**：`/etc/cron.d/route-lists` 每天 04:30 跑 `update-lists.sh`，它会重新生成
