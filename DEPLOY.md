@@ -191,7 +191,14 @@ PersistentKeepalive = 25
 
 - 国内 IP：命中主表里 `wg-route-up.sh` 灌入的 ~7400 条 `/etc/china_ip_list.txt` 明细路由（最长前缀匹配），eth0 直连。
 - 其余 IP：落到表 51820 的 `0.0.0.0/1 + 128.0.0.0/1`，走 wg0。
+- **`AllowedIPs = 0.0.0.0/1, 128.0.0.0/1` 不是笔误**：两条 /1 合起来覆盖全部 IPv4，
+  同时不会去碰主表默认路由；配合 `Table = 51820` 和规则 32765，正好实现"只接管非国内流量"。
+  写成 `0.0.0.0/0` 也能覆盖全部 IPv4，但更依赖 `Table=51820` 始终生效；一旦 Table 丢失，
+  `wg-quick` 会把默认路由写进主表，直接顶掉 `.1`，风险更大。排障时不要先改这里。
 - WG 自身流量带 0xca6c 标记跳过 32765，经 anti-loop `/32` 直连对端，防隧道套隧道。
+- **32764/32765 是分流总开关**：缺任意一条，`wg0` 即使握手成功也完全不参与转发，
+  所有流量仍走主表 `.1`，表现为"国内正常、海外全挂/像断网"。面板 `health_loop` 每 3 秒自检并自动补回；
+  `wg-route-up.sh` 也带重试和显式校验。
 - **同网段旁路由的转发**：客户端 -> 201 的包目的地址仍是公网 IP，`ip_forward=1` 后按上面两条规则选路；
   从 eth0 直连的做 `-s <LAN_NET> ! -d <LAN_NET> -o eth0 MASQUERADE`（SNAT 成 201），
   从 wg0 出去的做 `-s <LAN_NET> ! -d <LAN_NET> -o wg0 MASQUERADE`（SNAT 成 10.14.0.2）。
@@ -367,7 +374,8 @@ iptables -t nat -S POSTROUTING; sysctl net.ipv4.ip_forward
 | 症状 | 排查 |
 |------|------|
 | 同网段主机完全不通 | `ping <201 LAN IP>` → `iptables -t nat -S ROUTE_GW_NAT`（两条 MASQUERADE）→ `ip_forward=1`；确认客户端网关和 DNS 都指向 201 |
-| 能上国内、代理全不生效 | 策略规则丢失 → `systemctl restart wg-quick@wg0`；**或客户端 DNS 没指向 201**；或 `ROUTE_GW_NAT` 缺少 `-o wg0` 那条 |
+| 能上国内、代理全不生效 | 先看 `ip rule show \| grep -E '32764\|32765'`：缺规则时 `wg0` 有握手也不会被使用；面板会在 3 秒内自动补回，也可手动 `/usr/local/bin/wg-route-up.sh`。再查客户端 DNS 是否指向 201、`ROUTE_GW_NAT` 是否缺 `-o wg0` |
+| 切换节点后突然海外全挂 | 先确认 `ip rule` 两条规则是否还在；`AllowedIPs` 保持 `0.0.0.0/1,128.0.0.0/1`，不要改成 `0.0.0.0/0` 来"修"；规则丢失由面板自愈或手动重跑 `wg-route-up.sh` |
 | 客户端能通但被"绕过" | `cat /proc/sys/net/ipv4/conf/<LAN_IF>/send_redirects` 必须为 0；否则客户端会被 ICMP redirect 引到上游网关 |
 | 小网页能开、稍大的页面/下载卡死 | TCPMSS 规则丢失 → 见 3.5-2，跑 `wg-route-up.sh` 即恢复 |
 | WG 无握手 | `journalctl -u wg-quick@wg0`；`bash /opt/route-gw-deploy/tools/peer-check.sh` 看当前对端是谁，再确认 201 能直连**那个** `IP:51820`（UDP）、对端密钥/端口配对。注意 `wg0.conf` 出厂写的 `.59` 端口已不通，别照它排错 |

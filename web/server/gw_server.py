@@ -103,6 +103,7 @@ CTX = threading.local()
 LOCK = threading.RLock()
 SWITCH_LOCK = threading.Lock()
 LAST_SWITCH_ATTEMPT = [0.0]   # 最近一次"动过 wg0.conf"的时刻(含失败回滚)
+LAST_RULE_FIX = [0.0]         # 最近一次补策略路由规则的时刻(用于事件限流)
 
 
 def log(*a):
@@ -402,6 +403,29 @@ class Gateway:
         gw, wan = self.wan()
         if endpoint_ip and gw:
             sh(["ip", "route", "replace", "%s/32" % endpoint_ip, "via", gw, "dev", wan])
+
+    def policy_rules_ok(self):
+        """分流规则必须同时存在；缺任意一条，所有流量都会回到主表默认路由。"""
+        _, out, _ = sh(["ip", "-o", "rule", "show"])
+        out = out or ""
+        return ("32764:" in out and "suppress_prefixlength 0" in out
+                and "32765:" in out and "0xca6c" in out and "51820" in out)
+
+    def ensure_policy_rules(self):
+        """自愈：规则被误删/开机竞态/脚本中断时补回。返回是否做了修复。"""
+        if self.policy_rules_ok():
+            return False
+        sh(["ip", "rule", "del", "priority", "32764"])
+        sh(["ip", "rule", "del", "priority", "32765"])
+        for _ in range(3):
+            sh(["ip", "rule", "add", "from", "all", "lookup", "main",
+                "suppress_prefixlength", "0", "priority", "32764"])
+            sh(["ip", "rule", "add", "not", "from", "all", "fwmark", "0xca6c",
+                "lookup", "51820", "priority", "32765"])
+            if self.policy_rules_ok():
+                return True
+            time.sleep(0.2)
+        return self.policy_rules_ok()
 
     def conf_peer(self):
         """读 wg0.conf 的 [Peer]，返回 (pubkey, endpoint)；用于和运行中的隧道比对。"""
@@ -704,6 +728,8 @@ def do_switch(nid, kind="manual_switch", reason="用户操作"):
             push_event("node_down", "切换失败：wg syncconf 未生效(%s)，已还原 wg0.conf" % serr,
                        source="节点管理", to=node["name"], reason="隧道保持原 peer")
             return fail("wg syncconf 失败：%s" % serr, 502)
+        # syncconf 不会跑 PostUp；切换后顺手确认策略规则还在
+        GW.ensure_policy_rules()
         GW.anti_loop(node["server"])
         hs = GW.wait_handshake()
         cost = round(time.time() - t0, 1)
@@ -711,6 +737,8 @@ def do_switch(nid, kind="manual_switch", reason="用户操作"):
             rolled, rerr = False, ""
             if GW.restore_wg_conf(old_conf):
                 rolled, rerr = GW.sync_wg()
+                if rolled:
+                    GW.ensure_policy_rules()
                 if rolled and prev:
                     GW.anti_loop(prev["server"])
             if not rolled:
@@ -1233,6 +1261,12 @@ def health_loop():
     while True:
         time.sleep(G["HEALTH_EVERY"])
         try:
+            # 策略路由规则是分流的总开关：任何原因丢失都会让全网回到 .1 直连。
+            # 面板常驻时每 3 秒自检一次，丢了立即补回，不依赖 wg-quick 是否重跑 PostUp。
+            if GW.ensure_policy_rules() and time.time() - LAST_RULE_FIX[0] > 60:
+                LAST_RULE_FIX[0] = time.time()
+                push_event("self_heal", "检测到策略路由规则(32764/32765)丢失，已自动补回",
+                           source="自愈", reason="ip rule 缺失")
             peer = GW.dump(force=True).get("peer") or {}
             hs = peer.get("handshake", 0)
             GW.handshake_age = int(time.time() - hs) if hs else None

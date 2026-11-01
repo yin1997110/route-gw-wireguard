@@ -144,3 +144,26 @@ http://192.168.0.125:8080/                       → 200
    登录后请在「系统设置 → 账号安全」改成自己的密码。忘记时可用
    `sudo python3 /opt/gw-admin/gw_server.py --set-password admin '新密码'` 重置并
    `sudo systemctl restart gw-admin`。
+
+## 七、2026-11-01 策略规则丢失事件
+
+现象：切换节点后 `wg0` 仍有握手，但海外站点全挂，像是断网。检查发现：
+
+```text
+ip rule show
+0:      from all lookup local
+32766:  from all lookup main
+32767:  from all lookup default
+```
+
+**32764/32765 两条分流规则缺失**。此时 `wg0` 虽然握手成功，但没有任何流量被规则 32765
+送去表 51820，所有流量仍走主表 `.1`，所以国内正常、海外被墙。
+
+- **不是 `AllowedIPs` 的问题**：`0.0.0.0/1 + 128.0.0.0/1` 覆盖全部 IPv4，
+  配合 `Table=51820` 是正确写法；改成 `0.0.0.0/0` 不会解决，反而更依赖 Table 不丢失。
+- 已修复：
+  - `wg-route-up.sh` 给 32764/32765 加 5 次重试，并在末尾显式校验/记日志；
+  - 面板 `health_loop` 每 3 秒检查，发现规则缺失立即补回并写自愈事件；
+  - 节点切换/回滚成功后也调用一次 `ensure_policy_rules()`。
+- 已实测：手动删掉两条规则，面板 6 秒内补回；停面板后重跑 `wg-route-up.sh` 也能补回；
+  切换失败回滚后规则仍在。

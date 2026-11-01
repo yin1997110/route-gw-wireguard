@@ -172,6 +172,8 @@ pct exec 202 -- bash /opt/setup-202.sh
 | `wg set wg0 endpoint` | 报 Invalid argument，必须带 `peer <pubkey>` | DEPLOY.md §3.6 |
 | ICMP 通但 WG 打不上握手 | 「在线」节点切过去必失败 | DEPLOY.md §3.6 / WEB-DEPLOY.md §六 |
 | 回滚后不重测延迟 | 自愈拿着坏对端期间的 100% 丢包，把刚回滚好的健康节点也换掉 | WEB-DEPLOY.md §六 |
+| 切换后海外全挂、wg0 却有握手 | `ip rule` 的 32764/32765 丢失，流量仍走主表 `.1` | DEPLOY.md §3.2/§七 · TEST-REPORT.md §七 |
+| 以为 `AllowedIPs 0/1+128/1` 写错 | 改成 `0.0.0.0/0` 不解决，反而更依赖 Table 不丢 | DEPLOY.md §3.2 |
 | 用 `curl -f /api/system/info` 做健康检查 | 未登录返回 **HTTP 200 + code 401**，`-f` 探不出来 | WEB-DEPLOY.md §三 |
 
 ---

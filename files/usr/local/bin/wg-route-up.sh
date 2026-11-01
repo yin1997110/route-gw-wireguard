@@ -84,10 +84,30 @@ log "旁路由模式: LAN=$LAN_IF $LAN_IP/$LAN_PREFIX net=$LAN_NET, 上游=$WAN_
 #        但 suppress_prefixlength 0 让主表默认路由不生效。
 # 32765: 其余未打 fwmark 的流量查 51820（wg0 的 0/1 + 128/1）。
 # 先删同优先级旧规则，保证重复执行后规则唯一。
+# 注意：这两条规则是分流的总开关，删除后如果 add 失败，全网会悄悄回到 .1 直连。
+# 所以这里带重试，并在最后显式校验；面板 health_loop 也会每 3 秒兜底补一次。
 ip rule del priority 32764 2>/dev/null || true
 ip rule del priority 32765 2>/dev/null || true
-ip rule add from all lookup main suppress_prefixlength 0 priority 32764 2>/dev/null || true
-ip rule add not from all fwmark 0xca6c lookup 51820 priority 32765 2>/dev/null || true
+
+add_rule() {
+    local prio="$1"; shift
+    local i
+    for i in 1 2 3 4 5; do
+        ip rule add "$@" priority "$prio" 2>/dev/null && return 0
+        ip rule del priority "$prio" 2>/dev/null || true
+        sleep 0.2
+    done
+    return 1
+}
+
+add_rule 32764 from all lookup main suppress_prefixlength 0 || log "严重: 32764 策略规则补加失败"
+add_rule 32765 not from all fwmark 0xca6c lookup 51820 || log "严重: 32765 策略规则补加失败"
+if ! ip rule show | grep -q '^32764:'; then
+    log "严重: 32764 策略规则不存在，分流会失效（面板 health_loop 会兜底重试）"
+fi
+if ! ip rule show | grep -q '^32765:'; then
+    log "严重: 32765 策略规则不存在，分流会失效（面板 health_loop 会兜底重试）"
+fi
 
 # anti-loop: 隧道对端必须走 WAN 直连，否则 WG 自己的包会被 0/1 路由再灌回隧道
 if [ -n "${ENDPOINT:-}" ] && [ "${ENDPOINT#*:}" = "$ENDPOINT" ]; then
