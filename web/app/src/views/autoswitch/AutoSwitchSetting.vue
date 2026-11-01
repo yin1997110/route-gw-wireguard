@@ -3,7 +3,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useSystemStore } from '@/store/system'
 import { useNodeStore } from '@/store/nodes'
-import { PROBE, SWITCH, TRAFFIC } from '@/constants/config'
+import { SWITCH, TRAFFIC } from '@/constants/config'
 import { fmtTime } from '@/utils/format'
 
 const sys = useSystemStore()
@@ -12,10 +12,6 @@ const saving = ref(false)
 const probing = ref(false)
 const form = reactive({
   enabled: true,
-  probeType: PROBE.TYPES[0].value,
-  interval: PROBE.INTERVAL,
-  timeout: PROBE.TIMEOUT,
-  failThreshold: PROBE.FAIL_THRESHOLD,
   cooldown: SWITCH.COOLDOWN,
   sameRegionFirst: SWITCH.SAME_REGION_FIRST,
   groups: [],
@@ -25,7 +21,6 @@ const form = reactive({
 async function load() {
   await sys.fetchAutoSwitch()
   Object.assign(form, sys.autoSwitch || {})
-  if (!form.probeType) form.probeType = PROBE.TYPES[0].value
 }
 async function submit() {
   saving.value = true
@@ -41,35 +36,22 @@ async function doProbe() {
 }
 
 onMounted(() => { load(); nodes.fetchList(); sys.fetchSwitchEvents() })
-// EXTENSION_POINT: 通知渠道(钉钉/邮件/Bark)、探测源节点选择在此扩展
+// EXTENSION_POINT: 通知渠道(钉钉/邮件/Bark)、切换后的目标选择在此扩展
 </script>
 
 <template>
   <div class="gw-page as">
     <div class="as__grid">
       <div class="gw-card as__form">
-        <div class="gw-card__title">探测与健康检查</div>
+        <div class="gw-card__title">健康检查</div>
+        <div class="gw-muted as__probe-tip">
+          节点在线状态和延迟由数据源扫描提供，本机不再逐节点 ping/TCP 探测。
+          本机只检测当前隧道的 WireGuard 握手和隧道内实测，用于判断是否真的需要切换。
+        </div>
         <el-form :model="form" label-width="120px" label-position="left">
           <el-form-item label="启用自愈">
             <el-switch v-model="form.enabled" />
-            <span class="gw-muted as__tip">{{ form.enabled ? '故障节点将被自动剔除并切换' : '仅记录状态，不做任何切换' }}</span>
-          </el-form-item>
-          <el-form-item label="探测方式">
-            <el-radio-group v-model="form.probeType">
-              <el-radio-button v-for="t in PROBE.TYPES" :key="t.value" :value="t.value">{{ t.label }}</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item label="探测间隔">
-            <el-input-number v-model="form.interval" :min="5" :max="600" :step="5" />
-            <span class="gw-muted as__tip">秒</span>
-          </el-form-item>
-          <el-form-item label="单次超时">
-            <el-input-number v-model="form.timeout" :min="1" :max="30" />
-            <span class="gw-muted as__tip">秒</span>
-          </el-form-item>
-          <el-form-item label="故障判定阈值">
-            <el-input-number v-model="form.failThreshold" :min="1" :max="10" />
-            <span class="gw-muted as__tip">连续失败次数</span>
+            <span class="gw-muted as__tip">{{ form.enabled ? '当前隧道确认不可用时自动换节点' : '仅记录状态，不做任何切换' }}</span>
           </el-form-item>
         </el-form>
       </div>
@@ -98,7 +80,7 @@ onMounted(() => { load(); nodes.fetchList(); sys.fetchSwitchEvents() })
         </el-form>
         <div class="gw-flex gw-flex--gap as__actions">
           <el-button type="primary" :loading="saving" @click="submit">保存并生效</el-button>
-          <el-button :loading="probing" icon="Aim" @click="doProbe">立即探测全部节点</el-button>
+          <el-button :loading="probing" icon="Refresh" @click="doProbe">刷新节点源</el-button>
           <el-button link @click="load">还原未保存修改</el-button>
         </div>
       </div>
@@ -122,6 +104,7 @@ onMounted(() => { load(); nodes.fetchList(); sys.fetchSwitchEvents() })
 <style scoped>
 .as__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .as__form { padding: 14px 16px; }
+.as__probe-tip { margin-bottom: 14px; line-height: 1.7; font-size: 12px; }
 .as__tip { margin-left: 10px; font-size: 12px; }
 .as__fill { width: 100%; }
 .as__actions { margin-top: 6px; }

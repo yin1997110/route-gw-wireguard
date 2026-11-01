@@ -145,7 +145,7 @@ onActivated(() => { store.fetchList(); store.fetchSubs() })
         <el-table-column label="上/下行" width="150">
           <template #default="{ row }"><span class="gw-num nl__flow">↑{{ fmtBytes(row.upBytes) }} ↓{{ fmtBytes(row.downBytes) }}</span></template>
         </el-table-column>
-        <el-table-column label="最后探测" width="130">
+        <el-table-column label="最后同步" width="130">
           <template #default="{ row }"><span class="gw-muted">{{ fmtTime(row.lastCheck) }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="190" fixed="right">

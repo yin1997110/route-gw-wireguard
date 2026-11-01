@@ -617,8 +617,7 @@ def matrix_sync(force=False):
     pubs = wgc.get("pub") or []
     keymap = wgc.get("node") or {}
     excluded = set(ns.get("excluded") or [])
-    known = {n["name"]: n for n in ns.get("rows") or []}
-    thr = autoswitch()["failThreshold"]
+    now_ms = int(time.time() * 1000)
     rows = []
     for item in data.get("nodes") or []:
         n = dict(zip(cols, item))
@@ -626,25 +625,21 @@ def matrix_sync(force=False):
             continue
         kidx = keymap.get(str(n["id"]))
         pubkey = pubs[kidx] if isinstance(kidx, int) and 0 <= kidx < len(pubs) else None
-        old = known.get(n["name"]) or {}
-        # 矩阵同步不要把探测判出的 fault 洗成 online；否则 6h 后同一批坏节点
-        # 会再次走完 3 次失败→node_down，事件日志看起来像"连续判故障"。
-        keep_fault = (old.get("status") == "fault"
-                      and (old.get("cfail") or 0) >= thr)
+        # 本机不再做逐节点探测，状态/延迟完全以数据源扫描结果为准。
+        # 这也顺带清掉旧版本遗留的 fault，避免面板长期显示假故障。
         rows.append({
             "id": n["id"], "name": n["name"], "server": n["ip"], "port": n["port"],
             "group": "WG-%s" % (n.get("cc") or "XX"),
             "country": n.get("countryCn") or n.get("cc") or "—",
             "city": (n.get("city") or "—").capitalize(), "cc": n.get("cc"),
             "flag": flag_of(n.get("cc")),
-            "status": "fault" if keep_fault else ("online" if n.get("alive") else "offline"),
+            "status": "online" if n.get("alive") else "offline",
             "delay": n.get("ping"), "loss": 0, "health": n.get("health"),
             "pubkey": pubkey, "switchable": bool(pubkey), "nodeKeyIndex": kidx,
             "allowedOrigin": n.get("allowed"), "isp": n.get("isp"),
             "proxy": n.get("proxy"), "purity": n.get("purity"), "why": n.get("why"),
             "matrixLastTest": n.get("lastTest"), "upBytes": 0, "downBytes": 0,
-            "lastCheck": old.get("lastCheck", 0), "cfail": old.get("cfail", 0),
-            "probeHistory": old.get("probeHistory", []),
+            "lastCheck": now_ms, "cfail": 0, "probeHistory": [],
             "source": "matrix", "excluded": n["name"] in excluded,
         })
     ns.update({"rows": rows, "updatedAt": int(time.time()), "total": len(rows),
@@ -1367,7 +1362,7 @@ def sample_latency():
 
 
 def health_loop():
-    last_probe = last_ping = last_heal = 0
+    last_ping = last_heal = 0
     last_exit = 0
     while True:
         time.sleep(G["HEALTH_EVERY"])
@@ -1390,20 +1385,8 @@ def health_loop():
                 last_exit = time.time()
                 ip = GW.check_exit_ip(cfg()["exitCheckUrl"])
                 GW.exit_ip = ip or (peer.get("endpoint") or "").split(":")[0] or None
-            if time.time() - last_probe >= G["PROBE_EVERY"]:
-                last_probe = time.time()
-                ns = node_store()
-                pool = [n["id"] for n in (ns.get("rows") or []) + (ns.get("manual") or [])
-                        if not n.get("excluded")]
-                if pool:
-                    start = ns.get("probeCursor", 0) % len(pool)
-                    batch = [pool[(start + i) % len(pool)] for i in range(min(G["PROBE_BATCH"], len(pool)))]
-                    ns["probeCursor"] = start + len(batch)
-                    save_nodes(ns)
-                    try:
-                        apply_probe_results(probe_ids(batch))
-                    except Exception as e:  # noqa: BLE001
-                        log("探测失败", e)
+            # 节点是否在线/延迟由数据源（本网络内的扫描服务）提供，本机不再逐节点探测。
+            # 这里只保留当前隧道的 handshake + 隧道内实测，供自愈判断“当前这条线”是否真死。
             if time.time() - last_heal >= max(10, autoswitch().get("interval", 30)):
                 last_heal = time.time()
                 maybe_auto_switch()
@@ -2153,16 +2136,14 @@ def routes_table():
     R.append(["PUT", r"^/system/autoswitch$", r_as_put])
 
     def r_probe(q, b, m):
-        ns = node_store()
-        pool = [n for n in (ns.get("rows") or []) if n.get("switchable") and not n.get("excluded")]
-        ids = [n["id"] for n in pool if n.get("source") == "manual" or n.get("current")]
-        ids += [n["id"] for n in sorted(pool, key=lambda n: n["delay"]
-                                        if n.get("delay") is not None else 1e9)[:60]]
-        ids = list(dict.fromkeys(ids))[:120]
-        online, fault = apply_probe_results(probe_ids(ids))
-        push_event("sys_op", "手动探测完成：本轮 %s/%s 可达，判故障 %s" % (online, len(ids), fault),
-                   source="探测", detail="ICMP 走 WAN 网卡(%s)直探节点入口，绕过策略路由" % GW.wan()[1])
-        return ok({"online": online, "total": len(ids)})
+        # 兼容旧前端/旧脚本的 /probe-now：现在不再本机逐节点 ping，
+        # 改为强制刷新数据源（扫描由数据源所在网络完成）。
+        ns = matrix_sync(force=True)
+        rows = ns.get("rows") or []
+        online = sum(1 for n in rows if n.get("status") == "online")
+        push_event("sys_op", "节点源刷新完成：%s/%s 在线" % (online, len(rows)),
+                   source="节点源", detail="由数据源扫描，本机不逐节点探测")
+        return ok({"online": online, "total": len(rows)})
     R.append(["POST", r"^/system/probe-now$", r_probe])
 
     def r_password(q, body, m):
@@ -2703,8 +2684,9 @@ def cli(args):
         print("节点池:", matrix_sync(force=True).get("total"))
         return 0
     if cmd == "probe":
-        ids = [n["id"] for n in node_store().get("rows") or []][:int(args[1] if len(args) > 1 else 40)]
-        print("在线/故障:", apply_probe_results(probe_ids(ids)))
+        ns = matrix_sync(force=True)
+        rows = ns.get("rows") or []
+        print("节点源: %s 个 / 在线 %s" % (len(rows), sum(1 for n in rows if n.get("status") == "online")))
         return 0
     if cmd == "switch":
         print(json.dumps(do_switch(args[1], "manual_switch", "CLI 操作"), ensure_ascii=False))

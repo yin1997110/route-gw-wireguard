@@ -149,7 +149,7 @@ systemctl show gw-admin -p Environment    # 确认三条都在
 | 读 | `iptables -t nat/mangle -S` | NAT/FORWARD/MSS 钳制是否在位 |
 | 读 | `dnsmasq --test` + `/etc/dnsmasq.d/*` 行数 | 分流域名数、配置语法 |
 | 读 | `journalctl -u dnsmasq.service -f` | 域名规则命中日志（见第八节，本容器 rsyslog 是坏的） |
-| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「立即探测」或 `--sync`）。仓库里是占位地址；真实地址优先取 `config.json` 的 `nodeSource`，为空才回退 systemd drop-in 的 `GW_MATRIX_URL`。可在「系统设置 → 节点数据源」修改并预检，格式见 **MATRIX-FORMAT.md** |
+| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「刷新节点源」或 `--sync`）。仓库里是占位地址；真实地址优先取 `config.json` 的 `nodeSource`，为空才回退 systemd drop-in 的 `GW_MATRIX_URL`。可在「系统设置 → 节点数据源」修改并预检，格式见 **MATRIX-FORMAT.md** |
 | 写 | `/etc/wireguard/wg0.conf` 的 `[Peer]` | 切换节点＝改写公钥+入口，AllowedIPs **恒为** `0.0.0.0/1, 128.0.0.0/1`，绝不跟随节点给的 `0.0.0.0/0` |
 | 写 | `wg syncconf` | 平滑换对端：不重建接口、不动策略路由、下挂设备不断网 |
 | 写 | `/etc/dnsmasq.d/97-panel.conf` | 「分流规则」里的域名规则编译成 `server=/域名/上游` 或 `address=/域名/` |
@@ -220,9 +220,9 @@ bash /opt/route-gw-deploy/tools/peer-check.sh
 #   conf=203.0.113.10:51820 live=203.0.113.10:51820 文件/隧道=一致 握手距今=122s
 ```
 
-> **ICMP 通 ≠ 隧道能用**。矩阵页的 alive/延迟是 ICMP 探测结果，同一城市里存在 ping 82~95ms
-> 但 WG 端口永不握手的节点（本次 TW_Taiwan_59/.60/.77 就是这样）。所以"可切换"只能由真实握手
-> 决定；面板切不过去、8 秒超时回滚，是保护，不是故障。
+> **节点 alive/延迟来自数据源扫描，不是本机探测**。同一城市里仍可能存在 ping 看起来正常
+> 但 WG 端口不握手的节点（本次 TW_Taiwan_59/.60/.77 就是这样）。所以"可切换"只能由真实握手
+> 决定；面板切不过去、8 秒超时回滚，是保护，不是故障。本机只测当前隧道的握手和隧道内延迟。
 
 ## 七、面板 CLI 速查（`pct exec 201 -- python3 /opt/gw-admin/gw_server.py …`）
 
@@ -230,7 +230,7 @@ bash /opt/route-gw-deploy/tools/peer-check.sh
 |---|---|
 | `--status` | 人读的状态快照：隧道、当前节点、`wg0.conf` 是否与隧道一致、**现测**延迟/丢包/出口、节点池、数据源、规则数、今日流量 |
 | `--sync` | 立刻强制同步矩阵节点池（后台线程每 300s 醒一次，但距上次成功不足 `MATRIX_FETCH_INTERVAL`=6h 时会直接跳过，所以手动 `--sync` 才是真刷新） |
-| `--probe N` | 探前 N 个节点（默认 40）连通性 |
+| `--probe` | 兼容旧脚本；现在等同强制刷新数据源，不再本机逐节点探测 |
 | `--switch <节点ID>` | 命令行切节点（走和面板完全相同的七步流程） |
 | `--restore` | `wg0.conf` 与隧道分叉时以隧道为准重写配置文件，**不动运行中的隧道** |
 | `--apply-rules` | 把规则重新编译下发（`97-panel.conf` + IP 明细路由） |
@@ -268,7 +268,7 @@ curl -s -b $CK $A/system/tunnel | python3 -m json.tool | head # 4. wgUp=true、e
 | 3 | 登出/重登 | 登出有确认；重启 `gw-admin` 后浏览器**仍是登录态**（sessions.json 持久化） |
 | 4 | 切换（可达节点） | 1 秒内成功，`wg0.conf` 与隧道同步，出口 IP 跟随新节点，CT202 不断网 |
 | 5 | 切换（WG 端口不通的节点） | 8s 超时 → `code=502 … 握手超时，已回滚`，隧道与文件都停在原节点，之后**不应**发生自愈误切 |
-| 6 | 自愈 | 封锁当前对端 UDP 后，一个探测周期内换到同区域可用节点，事件里有 `auto_switch/node_up/self_heal` |
+| 6 | 自愈 | 封锁当前对端 UDP 后，连续两次隧道实测 100% 丢包且握手超时，换到同区域可用节点，事件里有 `auto_switch/node_up/self_heal` |
 | 7 | 域名规则 | 新增后 `/etc/dnsmasq.d/97-panel.conf` 有对应行；CT202 解析该域名 → 规则「命中」列 +1，行内「日志」抽屉有客户端 IP |
 | 8 | 删除规则 | `97-panel.conf` 同步移除，CT202 直连/隧道两类站点仍分别 200 |
 | 9 | 备份/恢复 | 「导出备份」下载 JSON（含 autoSwitch/config/手动节点/规则/订阅，矩阵节点不打包，重新同步即可）；「恢复备份」**先弹二次确认**，取消不发请求 |

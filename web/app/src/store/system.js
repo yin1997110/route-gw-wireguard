@@ -93,7 +93,7 @@ export const useSystemStore = defineStore('system', () => {
   }
   async function probeNow() {
     const r = await sysApi.probeNow()
-    ElMessage.success(`探测完成: ${r.online}/${r.total} 在线`)
+    ElMessage.success(`节点源已刷新: ${r.online}/${r.total} 在线`)
     return r
   }
   // 自动切换面板专用: 最近切换记录(不影响事件页的 eventQuery)
