@@ -1,6 +1,6 @@
 <!-- 职责: 系统设置页。网关操作(重载/重启/备份/恢复)、网关基础配置、账号安全、运行环境与隧道自检。 -->
 <script setup>
-import { ref, reactive, computed, onActivated } from 'vue'
+import { ref, reactive, computed, watch, onActivated } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useSystemStore } from '@/store/system'
 import { useAuthStore } from '@/store/auth'
@@ -66,6 +66,22 @@ async function loadConfig() {
 }
 async function saveConfig() {
   await sys.saveConfig({ ...cfgForm.value })
+}
+
+// ---- 节点数据源（matrix data.js） ----
+const sourceTesting = ref(false)
+const sourceInfo = ref(null)
+watch(() => cfgForm.value.nodeSource, () => { sourceInfo.value = null })
+async function doTestSource() {
+  const url = (cfgForm.value.nodeSource || '').trim()
+  if (!url) return ElMessage.warning('请先填写 data.js 地址')
+  sourceTesting.value = true
+  try {
+    sourceInfo.value = await sys.testSource(url)
+    ElMessage.success(`校验通过：${sourceInfo.value.total} 个节点，其中 ${sourceInfo.value.wg} 个 WireGuard 节点`)
+  } finally {
+    sourceTesting.value = false
+  }
 }
 
 const confirmRestart = reactive({ open: false })
@@ -174,6 +190,32 @@ onActivated(() => { loadConfig(); sys.fetchSysInfo(); sys.fetchTunnel() })
         <el-skeleton v-else :rows="5" animated />
       </div>
 
+      <div class="gw-card st__source">
+        <div class="gw-card__title">节点数据源</div>
+        <template v-if="sys.config">
+          <div class="gw-muted st__opdesc st__source-tip">
+            矩阵 data.js 地址。支持 http/https，内网自签名 HTTPS 也可用；保存前会实际拉取并校验结构，
+            格式见 <b>MATRIX-FORMAT.md</b>。留空表示回退到 systemd 的 GW_MATRIX_URL。
+          </div>
+          <el-form label-width="90px" label-position="left">
+            <el-form-item label="data.js URL">
+              <el-input v-model="cfgForm.nodeSource" clearable
+                        placeholder="https://matrix.example.com:3333/data.js" />
+            </el-form-item>
+            <div class="gw-flex gw-flex--gap st__source-actions">
+              <el-button :loading="sourceTesting" @click="doTestSource">测试并校验</el-button>
+              <el-button type="primary" @click="saveConfig">保存并生效</el-button>
+            </div>
+          </el-form>
+          <el-alert v-if="sourceInfo" type="success" :closable="false" show-icon class="st__source-alert"
+                    :title="`校验通过：${sourceInfo.total} 个节点，${sourceInfo.wg} 个 WireGuard 节点，可切换 ${sourceInfo.switchable} 个`" />
+          <div class="gw-muted st__source-cur">
+            当前生效：<span class="gw-num">{{ sys.config.nodeSource || '—' }}</span>
+          </div>
+        </template>
+        <el-skeleton v-else :rows="3" animated />
+      </div>
+
       <div class="gw-card st__pwd">
         <div class="gw-card__title">账号安全</div>
         <div class="gw-muted st__opdesc st__pwd-tip">当前账号 <span class="gw-num">{{ auth.username }}</span> · 会话有效期 7 天，改密后下次登录生效</div>
@@ -248,7 +290,12 @@ onActivated(() => { loadConfig(); sys.fetchSysInfo(); sys.fetchTunnel() })
 
 <style scoped>
 .st__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
-.st__ops, .st__cfg, .st__pwd { padding: 14px 16px; }
+.st__ops, .st__cfg, .st__pwd, .st__source { padding: 14px 16px; }
+.st__source { grid-column: 1 / -1; }
+.st__source-tip { line-height: 1.7; margin-bottom: 12px; }
+.st__source-actions { margin: 2px 0 8px; }
+.st__source-alert { margin-top: 8px; }
+.st__source-cur { margin-top: 10px; font-size: 12px; word-break: break-all; }
 .st__oplist { display: flex; flex-direction: column; gap: 4px; }
 .st__op {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

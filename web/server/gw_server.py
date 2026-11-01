@@ -531,6 +531,73 @@ def save_nodes(ns, flush=False):
     (S.save if flush else S.set_mem)("nodes.json", ns)
 
 
+def matrix_load(url, timeout=45):
+    """拉取并校验 data.js；返回 (data, error)。
+
+    兼容纯 JSON 和 `window.VPN_DATA = {...}` 两种写法；证书校验关闭，
+    因为内网数据源常用自签名 HTTPS。校验只做结构最低要求，详细字段见 MATRIX-FORMAT.md。
+    """
+    url = str(url or "").strip()
+    if not re.match(r"^https?://", url):
+        return None, "URL 必须以 http:// 或 https:// 开头"
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(url, timeout=timeout, context=ctx) as r:
+            raw = r.read().decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return None, "拉取失败: %s" % str(e)[:200]
+    try:
+        data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except Exception as e:  # noqa: BLE001
+        return None, "不是合法 JSON: %s" % str(e)[:160]
+    try:
+        cols = data["meta"]["cols"]
+        nodes = data.get("nodes")
+        wg = (data.get("cfg") or {}).get("wg")
+        if not isinstance(cols, list) or not cols:
+            return None, "meta.cols 缺失或不是数组"
+        if not isinstance(nodes, list) or not nodes:
+            return None, "nodes 为空"
+        if not isinstance(wg, dict):
+            return None, "cfg.wg 缺失"
+        if not isinstance(wg.get("pub"), list):
+            return None, "cfg.wg.pub 缺失或不是数组"
+        if not isinstance(wg.get("node"), dict):
+            return None, "cfg.wg.node 缺失或不是对象"
+    except Exception as e:  # noqa: BLE001
+        return None, "结构不符合 data.js 约定: %s" % str(e)[:160]
+    return data, ""
+
+
+def matrix_probe(url, timeout=12):
+    """给面板“测试数据源”用：只返回统计信息，不返回节点 IP/公钥。"""
+    data, err = matrix_load(url, timeout=timeout)
+    if err:
+        return None, err
+    cols = data["meta"]["cols"]
+    wg = (data["cfg"] or {}).get("wg") or {}
+    pubs = wg.get("pub") or []
+    keymap = wg.get("node") or {}
+    wg_count = switchable = 0
+    for item in data.get("nodes") or []:
+        n = dict(zip(cols, item))
+        if n.get("proto") != "wg":
+            continue
+        wg_count += 1
+        kidx = keymap.get(str(n.get("id")))
+        if isinstance(kidx, int) and 0 <= kidx < len(pubs):
+            switchable += 1
+    if wg_count == 0:
+        return None, "数据源里没有 proto=wg 的节点"
+    meta = data.get("meta") or {}
+    # 不返回 meta.source：线上矩阵里它可能是服务端文件路径（/home/.../vpn.db）
+    return {"url": str(url).strip(), "total": len(data.get("nodes") or []),
+            "wg": wg_count, "switchable": switchable,
+            "builtAt": meta.get("builtAt")}, ""
+
+
 def matrix_sync(force=False):
     """拉矩阵页 data.js(window.VPN_DATA) → 面板节点池。
     只导入 WireGuard 节点：本机只有 wireguard-tools，OpenVPN 节点无法真正切换，不给假能力。"""
@@ -538,21 +605,12 @@ def matrix_sync(force=False):
     if not force and time.time() - ns.get("updatedAt", 0) < G["MATRIX_FETCH_INTERVAL"]:
         return ns
     url = cfg().get("nodeSource") or D["MATRIX"]
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(url, timeout=45, context=ctx) as r:
-            raw = r.read().decode("utf-8", errors="replace")
-    except Exception as e:  # noqa: BLE001
-        push_event("sub_fail", "矩阵节点源拉取失败，沿用现有节点池", source="节点管理", detail=str(e)[:200])
+    data, err = matrix_load(url)
+    if err:
+        push_event("sub_fail", "矩阵节点源拉取/解析失败，沿用现有节点池",
+                   source="节点管理", detail=err[:200])
         return ns
-    try:
-        data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
-        cols = data["meta"]["cols"]      # 缺 meta 的 JSON 会 KeyError，一并算解析失败
-    except Exception as e:  # noqa: BLE001
-        push_event("sub_fail", "矩阵节点源解析失败", source="节点管理", detail=str(e)[:200])
-        return ns
+    cols = data["meta"]["cols"]
     wgc = (data.get("cfg") or {}).get("wg") or {}
     pubs = wgc.get("pub") or []
     keymap = wgc.get("node") or {}
@@ -1485,7 +1543,7 @@ def live_config():
         c["wgLan"] = m.group(1)
     c["mssClamp"] = GW.has_mss_clamp()
     c["listUpdateAt"] = cron_time()
-    c.setdefault("nodeSource", D["MATRIX"])
+    c["nodeSource"] = c.get("nodeSource") or D["MATRIX"]
     return c
 
 
@@ -1954,6 +2012,14 @@ def routes_table():
 
     R.append(["GET", r"^/system/config$", lambda q, b, m: ok(live_config())])
 
+    def r_source_test(q, body, m):
+        url = str((body or {}).get("url") or "").strip()
+        info, err = matrix_probe(url)
+        if err:
+            return fail("数据源校验失败: " + err)
+        return ok(info)
+    R.append(["POST", r"^/system/source/test$", r_source_test])
+
     def r_cfg_put(q, body, m):
         c = cfg()
         # 网络地址是现算的，不落 config.json（避免换网络后备份里带出旧地址误导）
@@ -1961,9 +2027,27 @@ def routes_table():
             c.pop(k, None)
         changed = {k: body[k] for k in ("queryLog", "latencyTarget", "exitCheckUrl", "nodeSource",
                                         "mssClamp", "listUpdateAt") if k in body and body[k] != c.get(k)}
+        if "nodeSource" in changed:
+            src = str(changed["nodeSource"] or "").strip()
+            if src:
+                info, err = matrix_probe(src)
+                if err:
+                    return fail("数据源校验失败: " + err)
+                changed["nodeSource"] = src
+            else:
+                # 空值 = 回退到 systemd 的 GW_MATRIX_URL 默认值
+                changed["nodeSource"] = ""
         c.update(changed)
         S.save("config.json", c)
         notes = []
+        if "nodeSource" in changed:
+            notes.append("节点数据源已更新" if changed["nodeSource"] else "节点数据源已回退到默认值")
+            # 立即同步一次节点池；失败不回滚配置（下次 6h 同步还会重试）
+            try:
+                ns = matrix_sync(force=True)
+                notes.append("节点池已同步: %s 个" % ns.get("total", 0))
+            except Exception as e:  # noqa: BLE001
+                notes.append("节点池同步失败: %s" % str(e)[:120])
         if "mssClamp" in changed:
             spec = ["iptables", "-t", "mangle", "-C", "ROUTE_GW_MSS", "-p", "tcp",
                     "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"]

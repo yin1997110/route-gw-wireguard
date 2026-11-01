@@ -1,0 +1,15 @@
+[Unit]
+Description=route-gw overlay NAT for ZeroTier/Tailscale
+Documentation=file:/opt/route-gw-deploy/MIGRATE.md
+After=network-online.target zerotier-one.service tailscaled.service
+Wants=network-online.target
+PartOf=zerotier-one.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/overlay-route-up.sh
+ExecStop=/usr/local/bin/overlay-route-down.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -33,6 +33,9 @@ else
 fi
 
 install -m 755 "$FILES"/usr/local/bin/*.sh /usr/local/bin/
+# overlay NAT（ZeroTier/Tailscale）单元只安装，不自动 enable：
+# 装好 overlay 后再 systemctl enable --now route-gw-overlay
+install -m 644 "$FILES/etc/systemd/system/route-gw-overlay.service" /etc/systemd/system/route-gw-overlay.service
 install -m 644 "$FILES/etc/dnsmasq.conf" /etc/dnsmasq.conf
 install -m 644 "$FILES/etc/dnsmasq.d/00-listen.conf" /etc/dnsmasq.d/00-listen.conf
 
@@ -104,7 +107,21 @@ echo "[6/8] 首次拉取数据源（github 走隧道下载）"
 
 echo "[7/8] 启动 dnsmasq 与 cron"
 systemctl enable --now dnsmasq cron
+# 已装 ZeroTier/Tailscale 的机器可启用 overlay NAT；没有 overlay 的机器保持不启动
+if command -v zerotier-cli >/dev/null 2>&1 || command -v tailscale >/dev/null 2>&1; then
+    systemctl enable --now route-gw-overlay.service 2>/dev/null || true
+    echo "  已启用 route-gw-overlay.service（LAN -> ZeroTier/Tailscale NAT）"
+else
+    echo "  未检测到 ZeroTier/Tailscale；装好后执行 systemctl enable --now route-gw-overlay"
+fi
 systemctl restart dnsmasq
+
+# 可选：ZT_NETWORK_ID=... 时自动安装/加入 ZeroTier 并启用 overlay NAT。
+# 网络 ID 只从环境变量传，不写进仓库。
+if [ -n "${ZT_NETWORK_ID:-}" ] && [ -f "$BASE/install-zerotier.sh" ]; then
+    echo "[7b] 安装/加入 ZeroTier 并启用 overlay NAT"
+    bash "$BASE/install-zerotier.sh" "$ZT_NETWORK_ID" || echo "WARN: ZeroTier 安装/加入失败，稍后手动处理"
+fi
 
 echo "[8/8] 状态快照"
 sleep 2

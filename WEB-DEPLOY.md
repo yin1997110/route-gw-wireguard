@@ -5,6 +5,8 @@
 > 网关没跑起来时面板只会显示"未接入节点"。
 > 形态：单文件 Python 标准库后端 + 预构建 Vue3 静态产物 + systemd 常驻，全部跑在 201 容器内。
 > 从 CT201 整套搬到一台原生 Ubuntu 主机（含面板数据/AppArmor）见 **MIGRATE.md**。
+> 节点数据源 `data.js` 的格式与自建约定见 **MATRIX-FORMAT.md**；让 LAN 客户端访问
+> ZeroTier/Tailscale 见 **OVERLAY.md**。
 
 ---
 
@@ -147,7 +149,7 @@ systemctl show gw-admin -p Environment    # 确认三条都在
 | 读 | `iptables -t nat/mangle -S` | NAT/FORWARD/MSS 钳制是否在位 |
 | 读 | `dnsmasq --test` + `/etc/dnsmasq.d/*` 行数 | 分流域名数、配置语法 |
 | 读 | `journalctl -u dnsmasq.service -f` | 域名规则命中日志（见第八节，本容器 rsyslog 是坏的） |
-| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「立即探测」或 `--sync`）。仓库里是占位地址，真实地址由 systemd drop-in 的 `GW_MATRIX_URL` 提供，见第三节 |
+| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「立即探测」或 `--sync`）。仓库里是占位地址；真实地址优先取 `config.json` 的 `nodeSource`，为空才回退 systemd drop-in 的 `GW_MATRIX_URL`。可在「系统设置 → 节点数据源」修改并预检，格式见 **MATRIX-FORMAT.md** |
 | 写 | `/etc/wireguard/wg0.conf` 的 `[Peer]` | 切换节点＝改写公钥+入口，AllowedIPs **恒为** `0.0.0.0/1, 128.0.0.0/1`，绝不跟随节点给的 `0.0.0.0/0` |
 | 写 | `wg syncconf` | 平滑换对端：不重建接口、不动策略路由、下挂设备不断网 |
 | 写 | `/etc/dnsmasq.d/97-panel.conf` | 「分流规则」里的域名规则编译成 `server=/域名/上游` 或 `address=/域名/` |
@@ -158,7 +160,7 @@ systemctl show gw-admin -p Environment    # 确认三条都在
 面板**只碰 `[Peer]` 这一节**，`[Interface]` 的私钥永不进任何接口响应
 （`wg show wg0 dump` 的第 0 行第 0 列就是本机私钥，代码里明确丢弃）。
 
-### 接口清单（46 条，`routes_table()` 里注册）
+### 接口清单（`routes_table()` 里注册）
 
 | 页面 | 端点 | 读写 |
 |---|---|---|
@@ -173,7 +175,7 @@ systemctl show gw-admin -p Environment    # 确认三条都在
 | **日志查看** | `/api/system/log-units`（后端白名单）`/api/system/logs`（journal 单元走 `journalctl -n`，文件单元读尾部） | 只读 |
 | **数据源** | `/api/list/status`（国内 IP 明细/gfwlist 的文件大小、条数、更新时间、日志尾部）`POST /api/list/update`（调既有 `update-lists.sh`） | 读 + 复用已验证脚本 |
 | 事件日志 | `/api/event/list` `/api/event/clear` | 读 |
-| 系统设置 | `/api/system/info` `/api/system/tunnel` `/api/system/backup` `/api/system/restore` `/api/system/reload` `/api/system/restart` | 读+运维动作 |
+| 系统设置 | `/api/system/info` `/api/system/tunnel` `/api/system/backup` `/api/system/restore` `/api/system/reload` `/api/system/restart` `POST /api/system/source/test` | 读+运维动作；source/test 只拉取校验、不写配置；保存 `nodeSource` 会立即触发一次节点池同步 |
 
 新增观测页的共同约束：**不新造任何下发路径**。要改配置就复用原来那条已经跑通的路
 （`update-lists.sh`、`97-panel.conf` 编译、`do_switch` 七步），只读页则一律走白名单/参数校验，

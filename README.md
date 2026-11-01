@@ -20,6 +20,8 @@
 | 网关之上再装管理面板 | DEPLOY.md 做完 → **WEB-DEPLOY.md** |
 | 把现有 CT201 整套搬到一台原生 Ubuntu 主机 | **MIGRATE.md** |
 | 看迁移后的实测结果/性能/重启恢复 | **TEST-REPORT.md** |
+| 自建/修改节点数据源，或对接 data.js 格式 | **MATRIX-FORMAT.md** |
+| 让 LAN 客户端访问 ZeroTier/Tailscale 网络 | **OVERLAY.md** |
 | 只想快速上手 | 本文下面的「三、快速开始」 |
 | 改前端代码 / 加功能 | **web/app/CONTRACT.md**（开发契约）+ **web/app/ITERATION.md**（怎么迭代） |
 | 排障 | DEPLOY.md 第七节 · WEB-DEPLOY.md 第十节 |
@@ -37,7 +39,10 @@ route-gw-deploy/
 ├── WEB-DEPLOY.md              ← 面板部署文档（部署/登录/与网关融合点/换节点语义/运维）
 ├── MIGRATE.md                 ← 把 CT201 整套搬到一台原生 Ubuntu 主机（含 AppArmor 坑）
 ├── TEST-REPORT.md             ← 迁移后的 0.x 客户端 / Docker Registry / 大文件 / 强制重启报告
+├── MATRIX-FORMAT.md           ← data.js 节点源格式约定（自建内网源/数据包）
+├── OVERLAY.md                 ← LAN 客户端访问 ZeroTier/Tailscale 的 NAT 方案
 ├── install.sh                 ← 在 201 内以 root 执行：一键装网关（8 步，幂等）
+├── install-zerotier.sh        ← 安装 ZeroTier、加入网络（ID 由参数传入）并启用 overlay NAT
 ├── install-web.sh             ← 在 201 内以 root 执行：一键装/升面板（幂等，不覆盖 data/）
 ├── setup-202.sh               ← 在 202 内以 root 执行：客户端 DNS/网关对接（只有两件事）
 ├── files/                     ← 要落到容器里的配置文件原文（ wg0.conf 是示例值，私钥需自填 ）

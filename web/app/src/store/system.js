@@ -109,6 +109,8 @@ export const useSystemStore = defineStore('system', () => {
     config.value = await sysApi.putConfig(form)
     ElMessage.success('设置已保存')
   }
+  // 数据源预检：只拉取/校验，不写入 config
+  async function testSource(url) { return sysApi.testSource(url) }
 
   // 隧道自检: wg 实时状态 + 实测延迟 + 策略路由，来自网关真实命令，非缓存指标
   const tunnel = ref(null)
@@ -123,7 +125,7 @@ export const useSystemStore = defineStore('system', () => {
     sysInfo, fetchSysInfo, reload, restart, backup, restore,
     autoSwitch, fetchAutoSwitch, saveAutoSwitch, probeNow,
     switchEvents, fetchSwitchEvents,
-    config, fetchConfig, saveConfig,
+    config, fetchConfig, saveConfig, testSource,
     tunnel, fetchTunnel
   }
 })
