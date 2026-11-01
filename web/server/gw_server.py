@@ -64,8 +64,8 @@ G = {
     "LATENCY_TARGET": "1.1.1.1",                 # 隧道延迟实测目标
     "SWITCH_WAIT": 8,                            # 切换后等待握手秒数
     "PROBE_TIMEOUT": 2.5,
-    "PROBE_BATCH": 40,
-    "PROBE_EVERY": 5,                            # 后台分批探测节奏(秒)
+    "PROBE_BATCH": 20,
+    "PROBE_EVERY": 15,                           # 后台分批探测节奏(秒)；降低 ICMP 突发，避免主路由/对端限速
     "HEALTH_EVERY": 3,                           # 隧道健康检查节奏(秒)
     "PING_EVERY": 15,                            # 实测隧道延迟节奏(秒)
     "SAMPLE_EVERY": 2,                           # 流量采样节奏(秒)
@@ -104,6 +104,8 @@ LOCK = threading.RLock()
 SWITCH_LOCK = threading.Lock()
 LAST_SWITCH_ATTEMPT = [0.0]   # 最近一次"动过 wg0.conf"的时刻(含失败回滚)
 LAST_RULE_FIX = [0.0]         # 最近一次补策略路由规则的时刻(用于事件限流)
+DEAD_STREAK = [0]             # 隧道实测连续 100% 丢包次数(按 measurement 计，不按 3s 循环计)
+DEAD_LAST_AT = [0.0]          # 上一次计入 DEAD_STREAK 的 measured_at
 
 
 def log(*a):
@@ -616,6 +618,7 @@ def matrix_sync(force=False):
     keymap = wgc.get("node") or {}
     excluded = set(ns.get("excluded") or [])
     known = {n["name"]: n for n in ns.get("rows") or []}
+    thr = autoswitch()["failThreshold"]
     rows = []
     for item in data.get("nodes") or []:
         n = dict(zip(cols, item))
@@ -624,13 +627,17 @@ def matrix_sync(force=False):
         kidx = keymap.get(str(n["id"]))
         pubkey = pubs[kidx] if isinstance(kidx, int) and 0 <= kidx < len(pubs) else None
         old = known.get(n["name"]) or {}
+        # 矩阵同步不要把探测判出的 fault 洗成 online；否则 6h 后同一批坏节点
+        # 会再次走完 3 次失败→node_down，事件日志看起来像"连续判故障"。
+        keep_fault = (old.get("status") == "fault"
+                      and (old.get("cfail") or 0) >= thr)
         rows.append({
             "id": n["id"], "name": n["name"], "server": n["ip"], "port": n["port"],
             "group": "WG-%s" % (n.get("cc") or "XX"),
             "country": n.get("countryCn") or n.get("cc") or "—",
             "city": (n.get("city") or "—").capitalize(), "cc": n.get("cc"),
             "flag": flag_of(n.get("cc")),
-            "status": "offline" if not n.get("alive") else "online",
+            "status": "fault" if keep_fault else ("online" if n.get("alive") else "offline"),
             "delay": n.get("ping"), "loss": 0, "health": n.get("health"),
             "pubkey": pubkey, "switchable": bool(pubkey), "nodeKeyIndex": kidx,
             "allowedOrigin": n.get("allowed"), "isp": n.get("isp"),
@@ -681,18 +688,57 @@ def current_node():
 PING_RE = re.compile(r"(\d+) received.*?rtt min/avg/max/mdev = ([\d.]+)/([\d.]+)/([\d.]+)", re.S)
 
 
+def tcp_reachable(host, iface, port=443, timeout=2):
+    """从 WAN 网卡做一次 TCP connect，作为 ICMP 被墙时的兜底信号。
+
+    返回 True 的两种情况：
+      - connect 成功（端口有服务）
+      - ConnectionRefused（对方回了 RST，说明主机/路径可达，只是端口没开）
+    超时/不可达才是 False。WireGuard 的 UDP 51820 不能直接 connect，所以探 443。
+    """
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        # 必须绑定 WAN，否则会按 32765 规则走进 wg0，探到的是隧道不是入口
+        s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_BINDTODEVICE", 25), iface.encode())
+        t0 = time.monotonic()
+        try:
+            s.connect((host, port))
+        except ConnectionRefusedError:
+            return True, round((time.monotonic() - t0) * 1000, 1)
+        except OSError:
+            return False, None
+        return True, round((time.monotonic() - t0) * 1000, 1)
+    except OSError:
+        return False, None
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
 def probe_node(n, wan_if=None):
-    """节点入口可达性探测：`ping -I <wan>` 强制从物理出口发，拿到的是"未进隧道"的真实 RTT。
-    (WireGuard 端口是 UDP，TCP connect 恒失败，所以不能用 TCP 探活。)"""
+    """节点入口可达性探测：ICMP 优先；ICMP 不回包时用 WAN TCP 443 兜底。
+
+    仅对非 fault 节点做 TCP 兜底，避免对已知不可用节点持续扫端口。
+    仍然只从物理出口探测；current node 的最终健康由 wg handshake + 隧道实测决定。
+    """
     host = n.get("server")
     if not host:
         return False, None, 1.0
     iface = wan_if or GW.wan()[1]
     rc, out, _ = sh(["ping", "-c", "2", "-W", "1", "-i", "0.2", "-I", iface, host], timeout=8)
     m = PING_RE.search(out or "")
-    if not m:
-        return False, None, 1.0
-    return True, round(float(m.group(3)), 1), 0.0 if int(m.group(1)) >= 2 else 0.5
+    if m:
+        return True, round(float(m.group(3)), 1), 0.0 if int(m.group(1)) >= 2 else 0.5
+    if n.get("status") != "fault":
+        ok, rtt = tcp_reachable(host, iface)
+        if ok:
+            return True, rtt, 0.0
+    return False, None, 1.0
 
 
 def probe_ids(ids):
@@ -717,6 +763,8 @@ def apply_probe_results(results):
     """探测结果回写节点池：连续失败达阈值判故障，一次成功即恢复。"""
     ns = node_store()
     thr = autoswitch()["failThreshold"]
+    cur = current_node()
+    cur_id = cur["id"] if cur else None
     online = fault = 0
     for key in ("rows", "manual"):
         for n in ns.get(key) or []:
@@ -726,8 +774,13 @@ def apply_probe_results(results):
             good, rtt, loss = r
             hist = (n.get("probeHistory") or [])[-9:] + [1 if good else 0]
             n["probeHistory"] = hist
-            n["cfail"] = 0 if good else n.get("cfail", 0) + 1
             n["lastCheck"] = int(time.time() * 1000)
+            # 当前节点的最终健康由 wg handshake + 隧道实测决定，ICMP 只做展示。
+            # 否则主路由/对端丢一个 ICMP，就会把正在正常转发的当前节点判故障，
+            # 触发 auto_switch 反复重连 Surfshark。
+            if not good and n["id"] == cur_id:
+                continue
+            n["cfail"] = 0 if good else min(n.get("cfail", 0) + 1, 9999)
             if good:
                 n["delay"] = rtt
                 n["loss"] = max(loss, round(1 - hist.count(1) / len(hist), 2))
@@ -1366,13 +1419,20 @@ def maybe_auto_switch():
         # 丢包读数是在上一次动 wg0.conf 之前测的(可能是刚失败的坏对端)，不能用来判现在这条隧道
         return False
     cur = current_node()
-    # 判坏只看实测：隧道 ping 全丢，或当前节点被探测判故障
+    # 判坏只认隧道实测 100% 丢包，且要连续两个 measurement（约 30s）；
+    # 当前节点的 ICMP 探测结果不再参与 auto_switch，避免主路由/对端丢一个
+    # ICMP 就反复重建 WireGuard 会话。
     dead = GW.latency_loss >= 1
-    if cur is None:
-        # peer 对不上节点池(端点漂移/节点被移出池)：隧道通着就不动，实测全丢才需要另找节点
-        if not dead:
-            return False
-    elif not (dead or cur.get("status") == "fault"):
+    if dead:
+        if GW.measured_at > DEAD_LAST_AT[0]:
+            DEAD_STREAK[0] += 1
+            DEAD_LAST_AT[0] = GW.measured_at
+    else:
+        DEAD_STREAK[0] = 0
+    if not dead or DEAD_STREAK[0] < 2:
+        return False
+    # 刚握过手说明隧道还活着，别被一次 ping 抖动带走
+    if GW.handshake_age is not None and GW.handshake_age < 120:
         return False
     if time.time() - S.load("last_switch.json", {"t": 0})["t"] < a.get("cooldown", 300):
         return False
