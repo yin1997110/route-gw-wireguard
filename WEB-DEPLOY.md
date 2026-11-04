@@ -149,7 +149,7 @@ systemctl show gw-admin -p Environment    # 确认三条都在
 | 读 | `iptables -t nat/mangle -S` | NAT/FORWARD/MSS 钳制是否在位 |
 | 读 | `dnsmasq --test` + `/etc/dnsmasq.d/*` 行数 | 分流域名数、配置语法 |
 | 读 | `journalctl -u dnsmasq.service -f` | 域名规则命中日志（见第八节，本容器 rsyslog 是坏的） |
-| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「刷新节点源」或 `--sync`）。仓库里是占位地址；真实地址优先取 `config.json` 的 `nodeSource`，为空才回退 systemd drop-in 的 `GW_MATRIX_URL`。可在「系统设置 → 节点数据源」修改并预检，格式见 **MATRIX-FORMAT.md** |
+| 读 | `https://matrix.example.com:3333/data.js` | 节点矩阵（主数据源，后台 300s 醒一次、实际按 6h 节流刷新；手动同步点「刷新节点源」或 `--sync`）。仓库里是占位地址；真实地址优先取 `config.json` 的 `nodeSource`，为空才回退 systemd drop-in 的 `GW_MATRIX_URL`。可在「系统设置 → 节点数据源」修改并预检；数据源需要登录时同页填写账号密码（`source_auth.json` 0600，不进接口/备份），格式见 **MATRIX-FORMAT.md** |
 | 写 | `/etc/wireguard/wg0.conf` 的 `[Peer]` | 切换节点＝改写公钥+入口，AllowedIPs **恒为** `0.0.0.0/1, 128.0.0.0/1`，绝不跟随节点给的 `0.0.0.0/0` |
 | 写 | `wg syncconf` | 平滑换对端：不重建接口、不动策略路由、下挂设备不断网 |
 | 写 | `/etc/dnsmasq.d/97-panel.conf` | 「分流规则」里的域名规则编译成 `server=/域名/上游` 或 `address=/域名/` |

@@ -124,7 +124,33 @@ cc, countryCn, city, alive, ping, health, allowed
 - 「数据源」页的「手动更新」只更新国内 IP/gfwlist；节点池同步用
   `python3 /opt/gw-admin/gw_server.py --sync`，或在「节点数据源」保存一次。
 
-## 7. 安全
+## 7. 数据源登录（可选）
+
+如果 `data.js` 所在站点启用了账号登录（例如 SignalField），面板会先：
+
+```text
+POST <同源>/api/login
+Content-Type: application/json
+{"username":"...","password":"..."}
+```
+
+登录成功后用返回的会话 Cookie 再 GET `data.js`。面板不需要浏览器，也不保存 Cookie。
+
+在「系统设置 → 节点数据源」填写：
+
+- 登录账号
+- 登录密码（已保存时留空表示不修改）
+
+凭据只写入 `/opt/gw-admin/data/source_auth.json`（0600），不会：
+
+- 出现在 `GET /system/config` 响应里
+- 出现在 `GET /system/backup` 备份里
+- 写入 `config.json`
+- 写入仓库
+
+如果数据源是纯公开的，账号密码留空即可。登录接口路径固定为同源 `/api/login`；如果自建源用了别的登录路径，需要改 `_source_login_opener()`。
+
+## 8. 安全
 
 - `data.js` 里通常含节点入口 IP 和 WireGuard 公钥（不含私钥），但仍建议只在内网提供。
 - 如果地址里带 token，token 会落到 `/opt/gw-admin/data/config.json`，不要提交回仓库。

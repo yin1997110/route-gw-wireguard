@@ -110,7 +110,7 @@ export const useSystemStore = defineStore('system', () => {
     ElMessage.success('设置已保存')
   }
   // 数据源预检：只拉取/校验，不写入 config
-  async function testSource(url) { return sysApi.testSource(url) }
+  async function testSource(url, username, password) { return sysApi.testSource(url, username, password) }
 
   // 隧道自检: wg 实时状态 + 实测延迟 + 策略路由，来自网关真实命令，非缓存指标
   const tunnel = ref(null)

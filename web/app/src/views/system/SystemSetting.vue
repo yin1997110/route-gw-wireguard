@@ -62,22 +62,26 @@ const lanAddr = computed(() =>
 )
 async function loadConfig() {
   await sys.fetchConfig()
-  cfgForm.value = { ...sys.config }
+  cfgForm.value = { ...sys.config, dataSourcePass: '' }
 }
 async function saveConfig() {
   await sys.saveConfig({ ...cfgForm.value })
+  cfgForm.value.dataSourcePass = ''
+  cfgForm.value.dataSourcePassSet = !!(sys.config && sys.config.dataSourcePassSet)
 }
 
 // ---- 节点数据源（matrix data.js） ----
 const sourceTesting = ref(false)
 const sourceInfo = ref(null)
-watch(() => cfgForm.value.nodeSource, () => { sourceInfo.value = null })
+watch(() => [cfgForm.value.nodeSource, cfgForm.value.dataSourceUser, cfgForm.value.dataSourcePass],
+  () => { sourceInfo.value = null })
 async function doTestSource() {
   const url = (cfgForm.value.nodeSource || '').trim()
   if (!url) return ElMessage.warning('请先填写 data.js 地址')
   sourceTesting.value = true
   try {
-    sourceInfo.value = await sys.testSource(url)
+    sourceInfo.value = await sys.testSource(
+      url, cfgForm.value.dataSourceUser || '', cfgForm.value.dataSourcePass || '')
     ElMessage.success(`校验通过：${sourceInfo.value.total} 个节点，其中 ${sourceInfo.value.wg} 个 WireGuard 节点`)
   } finally {
     sourceTesting.value = false
@@ -202,6 +206,18 @@ onActivated(() => { loadConfig(); sys.fetchSysInfo(); sys.fetchTunnel() })
               <el-input v-model="cfgForm.nodeSource" clearable
                         placeholder="https://matrix.example.com:3333/data.js" />
             </el-form-item>
+            <el-form-item label="登录账号">
+              <el-input v-model="cfgForm.dataSourceUser" clearable autocomplete="username"
+                        placeholder="数据源账号；无登录可留空" />
+            </el-form-item>
+            <el-form-item label="登录密码">
+              <el-input v-model="cfgForm.dataSourcePass" type="password" show-password
+                        autocomplete="current-password"
+                        :placeholder="cfgForm.dataSourcePassSet ? '已保存，留空不修改' : '无登录可留空'" />
+            </el-form-item>
+            <div class="gw-muted st__opdesc st__source-tip">
+              账号密码仅用于数据源登录，保存在网关本地 600 权限文件，不会出现在接口响应或备份里。
+            </div>
             <div class="gw-flex gw-flex--gap st__source-actions">
               <el-button :loading="sourceTesting" @click="doTestSource">测试并校验</el-button>
               <el-button type="primary" @click="saveConfig">保存并生效</el-button>

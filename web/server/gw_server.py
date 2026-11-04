@@ -11,6 +11,7 @@
 # EXTENSION_POINT: 新接口在 routes_table() 注册，保持与 src/api/*.js 一一对应。
 import hashlib
 import hmac
+import http.cookiejar
 import http.cookies
 import ipaddress
 import json
@@ -25,11 +26,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urljoin, urlparse
 
 # ============================================================ 配置常量
 # 落点/阈值集中在此，业务代码不出现字面量路径。换机器只改这一段(或用同名环境变量覆盖)。
@@ -533,23 +535,106 @@ def save_nodes(ns, flush=False):
     (S.save if flush else S.set_mem)("nodes.json", ns)
 
 
-def matrix_load(url, timeout=45):
+SOURCE_AUTH_FILE = "source_auth.json"
+
+
+def source_auth():
+    """数据源账号密码单独存 600 文件，不进 config.json/备份/接口响应。"""
+    a = S.load(SOURCE_AUTH_FILE, {})
+    if not isinstance(a, dict):
+        return {"username": "", "password": ""}
+    return {"username": str(a.get("username") or ""), "password": str(a.get("password") or "")}
+
+
+def save_source_auth(username, password):
+    data = {"username": str(username or ""), "password": str(password or "")}
+    S.save(SOURCE_AUTH_FILE, data)
+    try:
+        os.chmod(S.path(SOURCE_AUTH_FILE), 0o600)
+    except OSError:
+        pass
+
+
+def source_auth_for_request(body):
+    """测试接口用：空密码且用户名未变时复用已保存密码；改用户名则必须重新输入。"""
+    body = body or {}
+    stored = source_auth()
+    username = (str(body.get("username")).strip()
+                if "username" in body else stored["username"])
+    if body.get("password"):
+        password = str(body.get("password"))
+    elif username == stored["username"]:
+        password = stored["password"]
+    else:
+        password = ""
+    return username, password
+
+
+def _source_login_opener(url, username, password, timeout):
+    """先 POST /api/login 拿会话 cookie，再用同一 opener 拉 data.js。"""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    jar = http.cookiejar.CookieJar()
+    handlers = [urllib.request.HTTPCookieProcessor(jar)]
+    if url.startswith("https://"):
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
+    login_url = urljoin(url, "/api/login")
+    req = urllib.request.Request(
+        login_url,
+        data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST")
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", errors="replace")
+            status = r.status
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:200]
+        return None, None, "数据源登录失败: HTTP %s %s" % (e.code, detail)
+    except Exception as e:  # noqa: BLE001
+        return None, None, "数据源登录失败: %s" % str(e)[:200]
+    if status != 200:
+        return None, None, "数据源登录失败: HTTP %s" % status
+    try:
+        d = json.loads(body)
+    except Exception:  # noqa: BLE001
+        return None, None, "数据源登录接口返回非 JSON"
+    if not d.get("ok"):
+        return None, None, "数据源登录失败: %s" % str(d.get("error") or "账号或密码不正确")[:160]
+    return opener, ctx, ""
+
+
+def matrix_load(url, timeout=45, username=None, password=None):
     """拉取并校验 data.js；返回 (data, error)。
 
     兼容纯 JSON 和 `window.VPN_DATA = {...}` 两种写法；证书校验关闭，
     因为内网数据源常用自签名 HTTPS。校验只做结构最低要求，详细字段见 MATRIX-FORMAT.md。
+    数据源开启登录时，username/password 会先 POST /api/login，再用会话 cookie 拉 data.js。
     """
     url = str(url or "").strip()
     if not re.match(r"^https?://", url):
         return None, "URL 必须以 http:// 或 https:// 开头"
+    username = str(username or "").strip()
+    password = str(password or "")
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(url, timeout=timeout, context=ctx) as r:
-            raw = r.read().decode("utf-8", errors="replace")
+        if username or password:
+            opener, _ctx, err = _source_login_opener(url, username, password, timeout)
+            if err:
+                return None, err
+            with opener.open(url, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+        else:
+            with urllib.request.urlopen(url, timeout=timeout, context=ctx) as r:
+                raw = r.read().decode("utf-8", errors="replace")
     except Exception as e:  # noqa: BLE001
         return None, "拉取失败: %s" % str(e)[:200]
+    if raw.lstrip().startswith("<!DOCTYPE") or raw.lstrip().startswith("<html"):
+        return None, "数据源返回登录页，请填写账号密码（或检查账号权限）"
     try:
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
     except Exception as e:  # noqa: BLE001
@@ -573,9 +658,9 @@ def matrix_load(url, timeout=45):
     return data, ""
 
 
-def matrix_probe(url, timeout=12):
+def matrix_probe(url, timeout=12, username=None, password=None):
     """给面板“测试数据源”用：只返回统计信息，不返回节点 IP/公钥。"""
-    data, err = matrix_load(url, timeout=timeout)
+    data, err = matrix_load(url, timeout=timeout, username=username, password=password)
     if err:
         return None, err
     cols = data["meta"]["cols"]
@@ -607,7 +692,8 @@ def matrix_sync(force=False):
     if not force and time.time() - ns.get("updatedAt", 0) < G["MATRIX_FETCH_INTERVAL"]:
         return ns
     url = cfg().get("nodeSource") or D["MATRIX"]
-    data, err = matrix_load(url)
+    auth = source_auth()
+    data, err = matrix_load(url, username=auth["username"], password=auth["password"])
     if err:
         push_event("sub_fail", "矩阵节点源拉取/解析失败，沿用现有节点池",
                    source="节点管理", detail=err[:200])
@@ -1587,6 +1673,9 @@ def live_config():
     c["mssClamp"] = GW.has_mss_clamp()
     c["listUpdateAt"] = cron_time()
     c["nodeSource"] = c.get("nodeSource") or D["MATRIX"]
+    a = source_auth()
+    c["dataSourceUser"] = a["username"]
+    c["dataSourcePassSet"] = bool(a["password"])
     return c
 
 
@@ -2057,7 +2146,8 @@ def routes_table():
 
     def r_source_test(q, body, m):
         url = str((body or {}).get("url") or "").strip()
-        info, err = matrix_probe(url)
+        username, password = source_auth_for_request(body)
+        info, err = matrix_probe(url, timeout=20, username=username, password=password)
         if err:
             return fail("数据源校验失败: " + err)
         return ok(info)
@@ -2068,23 +2158,40 @@ def routes_table():
         # 网络地址是现算的，不落 config.json（避免换网络后备份里带出旧地址误导）
         for k in ("wanIf", "wanGw", "lanIf", "lanIp", "lanPrefix", "lanCidr", "dnsAddr", "wgLan"):
             c.pop(k, None)
+        stored_auth = source_auth()
+        new_user = (str(body.get("dataSourceUser", stored_auth["username"])) or "").strip()
+        if body.get("dataSourcePass"):
+            new_pass = str(body.get("dataSourcePass"))
+        elif new_user != stored_auth["username"]:
+            # 改账号必须同时给新密码；否则旧密码很可能不匹配
+            new_pass = ""
+        else:
+            new_pass = stored_auth["password"]
+        if body.get("dataSourceClear"):
+            new_user, new_pass = "", ""
+        auth_changed = (new_user, new_pass) != (stored_auth["username"], stored_auth["password"])
         changed = {k: body[k] for k in ("queryLog", "latencyTarget", "exitCheckUrl", "nodeSource",
                                         "mssClamp", "listUpdateAt") if k in body and body[k] != c.get(k)}
-        if "nodeSource" in changed:
-            src = str(changed["nodeSource"] or "").strip()
-            if src:
-                info, err = matrix_probe(src)
-                if err:
-                    return fail("数据源校验失败: " + err)
+        src = str(changed.get("nodeSource", c.get("nodeSource") or D["MATRIX"]) or "").strip()
+        if ("nodeSource" in changed or auth_changed) and src:
+            info, err = matrix_probe(src, timeout=20, username=new_user, password=new_pass)
+            if err:
+                return fail("数据源校验失败: " + err)
+            if "nodeSource" in changed:
                 changed["nodeSource"] = src
-            else:
-                # 空值 = 回退到 systemd 的 GW_MATRIX_URL 默认值
-                changed["nodeSource"] = ""
+        # 空 nodeSource = 回退到 systemd 的 GW_MATRIX_URL 默认值
+        if "nodeSource" in changed and not str(changed["nodeSource"] or "").strip():
+            changed["nodeSource"] = ""
         c.update(changed)
         S.save("config.json", c)
+        if auth_changed:
+            save_source_auth(new_user, new_pass)
         notes = []
         if "nodeSource" in changed:
             notes.append("节点数据源已更新" if changed["nodeSource"] else "节点数据源已回退到默认值")
+        if auth_changed:
+            notes.append("数据源账号已更新" if new_user else "数据源账号已清除")
+        if "nodeSource" in changed or auth_changed:
             # 立即同步一次节点池；失败不回滚配置（下次 6h 同步还会重试）
             try:
                 ns = matrix_sync(force=True)
