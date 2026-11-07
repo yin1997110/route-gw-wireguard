@@ -1,7 +1,7 @@
 #!/bin/bash
 # 职责: 核对 wg0.conf 里写的对端 与 隧道里真实生效的对端 是否一致。
 #       面板换节点分叉(改文件成功、syncconf 失败)时用它一眼看出来。
-# 用法: 在 CT201 上 bash peer-check.sh；或 PVE 侧 pct exec 201 -- bash /opt/route-gw-deploy/tools/peer-check.sh
+# 用法: 在网关机上以 root 执行 bash tools/peer-check.sh（退出码 0=一致 1=分叉）
 E=$(grep -oE 'Endpoint = [0-9.:]+' /etc/wireguard/wg0.conf | awk '{print $3}')
 L=$(wg show wg0 dump | awk 'NR==2{print $3}')
 T=$(wg show wg0 dump | awk 'NR==2{print $5}')

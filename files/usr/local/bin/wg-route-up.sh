@@ -1,5 +1,5 @@
 #!/bin/bash
-# wg-route-up.sh — WireGuard PostUp 钩子：同网段单臂旁路由分流 (LXC 201)
+# wg-route-up.sh — WireGuard PostUp 钩子：同网段单臂旁路由分流 (单机旁路由)
 #
 # 形态: 只有一块 LAN 网卡。LAN 与 WAN 是同一个接口（默认路由所在网卡），
 #       同网段主机把「默认网关 + DNS」都指向本机即可分流：

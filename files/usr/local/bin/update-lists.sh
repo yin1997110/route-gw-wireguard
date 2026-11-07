@@ -76,6 +76,16 @@ fi
 
 if [ "$OK_DNS" = "1" ] && command -v systemctl >/dev/null && systemctl is-active dnsmasq >/dev/null 2>&1; then
     systemctl restart dnsmasq && log "dnsmasq 已重启"
+    # 重启后必须校验：dnsmasq 起不来 = 全内网 DNS 静默失效（2026-11-05 事故复盘，见 DEPLOY.md §七）
+    sleep 1
+    if ! systemctl is-active --quiet dnsmasq; then
+        log "严重错误: dnsmasq 重启后未能运行! 全部 DNS 已中断, 最近日志:"
+        journalctl -u dnsmasq -n 15 --no-pager 2>&1 | while read -r L; do log "    $L"; done
+    elif ! ss -lntu 2>/dev/null | grep -qE '127\.0\.0\.1:53\b'; then
+        log "严重错误: dnsmasq 进程在跑但未监听 53 端口!"
+    else
+        log "dnsmasq 重启校验通过 (53 端口监听正常)"
+    fi
 fi
 
 # ---------- 3. 隧道在跑就立即重新灌入国内直连路由（同时校准 LAN 网段/NAT） ----------

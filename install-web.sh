@@ -1,5 +1,5 @@
 #!/bin/bash
-# install-web.sh — 在 LXC 201 (router) 内以 root 执行：安装/升级分流网关管理面板
+# install-web.sh — 在网关机上以 root 执行：安装/升级分流网关管理面板
 #
 # 用法:
 #   bash /opt/route-gw-deploy/install-web.sh                        # 首次安装，自动生成管理员密码并打印
@@ -19,7 +19,7 @@ PORT="${GW_PANEL_PORT:-8080}"
 [ -f "$WEB/server/gw_server.py" ] || { echo "找不到 $WEB/server/gw_server.py"; exit 1; }
 
 echo "[1/6] 依赖检查"
-# 面板是纯 Python 标准库实现，只要 python3 在即可；CT201 已自带 3.12
+# 面板是纯 Python 标准库实现，只要 python3 在即可；Ubuntu 26.04 自带 3.13
 if ! command -v python3 >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq && apt-get install -y -qq python3

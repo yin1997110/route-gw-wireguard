@@ -1,5 +1,5 @@
 #!/bin/bash
-# wg-route-down.sh — WireGuard PostDown 钩子：清理同网段旁路由的分流规则 (LXC 201)
+# wg-route-down.sh — WireGuard PostDown 钩子：清理同网段旁路由的分流规则 (单机旁路由)
 #
 # 只清理本方案自己加的东西：策略路由、国内明细路由、endpoint 例外、NAT/FORWARD/MSS
 # 三条自定义链。不碰主表默认路由，也不停 dnsmasq。

@@ -8,7 +8,7 @@
 - Vue 3 (script setup) + Vite + Pinia + Vue Router + Element Plus + ECharts + Axios + dayjs
 - 后端契约：REST JSON `{ code: 200, data, msg }`，前缀 `/api`，dev 由 Vite 代理到零依赖 Mock（`server/mock-server.js:8931`）
 - 运行：`npm run dev`（自动同时拉起 mock），生产替换 `VITE_API_BASE_URL` 即可对接真实网关 API
-- **生产后端 = `web/server/gw_server.py`**（Python 标准库单文件，跑在 CT201，systemd 单元 `gw-admin`，默认 `0.0.0.0:8080`）。
+- **生产后端 = `web/server/gw_server.py`**（Python 标准库单文件，跑在网关机，systemd 单元 `gw-admin`，默认 `0.0.0.0:8080`）。
   它和 mock 走**同一套端点与响应结构**，前端不需要区分环境；改端点时两边都要改（见 §4）。
 - **鉴权**：会话是后端下发的 HttpOnly Cookie（`gw_admin_session`），前端不持 token、不落 localStorage。
   未登录访问受保护端点时后端返回 **HTTP 200 + `code: 401`**（不是 401 状态码），由 `request.js` 拦截器

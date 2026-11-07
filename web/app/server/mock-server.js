@@ -74,8 +74,8 @@ const db = {
   ],
   events: [],
   config: {
-    wanIf: 'eth0', wanGw: '192.168.1.1', lanIf: 'eth0', lanIp: '192.168.1.212',
-    lanPrefix: 24, lanCidr: '192.168.1.0/24', dnsAddr: '192.168.1.212', wgLan: '10.14.0.2/16',
+    wanIf: 'enp3s0', wanGw: '192.168.0.1', lanIf: 'enp3s0', lanIp: '192.168.0.125',
+    lanPrefix: 24, lanCidr: '192.168.0.0/24', dnsAddr: '192.168.0.125', wgLan: '10.14.0.2/16',
     mssClamp: true, listUpdateAt: '04:30', chinaRouteCount: 7461, gfwDomainCount: 4372
   },
   autoSwitch: {
@@ -166,7 +166,8 @@ function paginate(rows, { pageNum = 1, pageSize = 10 } = {}) {
   const size = Math.max(1, Number(pageSize))
   return { rows: rows.slice((p - 1) * size, p * size), total: rows.length }
 }
-const EXIT_IPS = ['62.197.157.46', '185.108.107.12', '103.135.212.30']
+// 出口 IP 用 RFC 5737 文档保留段(203.0.113.0/24)，不要填真实节点地址
+const EXIT_IPS = ['203.0.113.46', '203.0.113.107', '203.0.113.30']
 function nodeView(n) {
   return { ...n, exitIp: n.current ? EXIT_IPS[0] : undefined }
 }
@@ -487,11 +488,11 @@ const routes = [
   // 系统
   ['GET', /^\/system\/info$/, () => WRAP({
     hostname: 'route-gw (旁路由)', mode: 'same-subnet-bypass',
-    lanIf: 'eth0', lanIp: '192.168.1.212', lanPrefix: 24, lanCidr: '192.168.1.0/24', dnsAddr: '192.168.1.212',
+    lanIf: 'enp3s0', lanIp: '192.168.0.125', lanPrefix: 24, lanCidr: '192.168.0.0/24', dnsAddr: '192.168.0.125',
     os: 'Ubuntu 24.04.1 LTS', kernel: '6.8.0-41-generic',
     cpu: '1 vCore / 负载 0.12', memUsed: '212 MB', memTotal: '512 MB',
     uptime: `${Math.floor((now() - (bootAt * 1000)) / 3600_000)} 小时`, loadAvg: '0.12 0.09 0.06',
-    gatewayIp: '192.168.1.212 (eth0)', dnsMode: 'dnsmasq 分流 (53)',
+    gatewayIp: '192.168.0.125 (enp3s0)', dnsMode: 'dnsmasq 分流 (53)',
     listUpdatedAt: now() - 3600_000 * 7, bootAt: bootAt * 1000, bootAtText: new Date(bootAt * 1000).toISOString()
   })],
   ['GET', /^\/system\/tunnel$/, () => {

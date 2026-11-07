@@ -1,6 +1,6 @@
 [Unit]
 Description=route-gw overlay NAT for ZeroTier/Tailscale
-Documentation=file:/opt/route-gw-deploy/MIGRATE.md
+Documentation=file:/opt/route-gw-deploy/OVERLAY.md
 After=network-online.target zerotier-one.service tailscaled.service
 Wants=network-online.target
 PartOf=zerotier-one.service

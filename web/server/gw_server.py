@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 职责: 分流网关管理面板的真实后端。部署在 LXC 201 本机，同时托管前端 dist 静态文件，
+# 职责: 分流网关管理面板的真实后端。部署在网关机本机，同时托管前端 dist 静态文件，
 #       并把 /api/* 映射到真实的 wg / ip / dnsmasq / 矩阵节点池状态。
 # 契约: 响应包 {code, data, msg}，与 server/mock-server.js 完全一致(业务错误也回 HTTP 200，
 #       由 code 区分)，前端不区分两者。
-# 为什么只用标准库: CT201 上没有 node / pip3 / nginx，只有 python3.12 + busybox + iproute2。
+# 为什么只用标准库: 网关机上没有 node / pip3 / nginx，只有 python3 + iproute2。
 #       零依赖 = 二次部署只要 cp 文件 + systemctl start。
 # 运行: GW_DIST_DIR=/opt/gw-admin/dist GW_DATA_DIR=/opt/gw-admin/data python3 gw_server.py
 # 运维: python3 gw_server.py --status|--sync|--probe N|--switch ID|--apply-rules|--events

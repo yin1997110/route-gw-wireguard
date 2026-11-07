@@ -1,0 +1,8 @@
+[Unit]
+Description=dnsmasq health check and self-heal
+Documentation=file:/opt/route-gw-deploy/DEPLOY.md
+After=dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dnsmasq-healthcheck.sh

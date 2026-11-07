@@ -1,4 +1,4 @@
-# 职责: systemd 服务单元 —— 让管理面板随 LXC 201 常驻自启。
+# 职责: systemd 服务单元 —— 让管理面板随网关机常驻自启。
 # 说明: 面板要读写 /etc/dnsmasq.d/97-panel.conf 并调用 wg/ip/iptables/crontab，
 #       必须以 root 运行；单文件 Python 标准库服务，无外部依赖。
 [Unit]
